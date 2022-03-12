@@ -2,6 +2,8 @@ import argparse
 import logging
 import os
 import traceback
+from archivebot.storage import JsonFiles
+from archivebot.utility import SlackMessage
 
 from slack_bolt import App
 
@@ -13,6 +15,12 @@ parser.add_argument(
     "--database-path",
     default="slack.sqlite",
     help="path to the SQLite database. (default = ./slack.sqlite)",
+)
+parser.add_argument(
+    "-s",
+    "--storage-path",
+    default="file_storage",
+    help="path to the file storage directory. (default = ./file_storage)",
 )
 parser.add_argument(
     "-l",
@@ -28,6 +36,7 @@ cmd_args, unknown = parser.parse_known_args()
 # Check the environment too
 log_level = os.environ.get("ARCHIVE_BOT_LOG_LEVEL", cmd_args.log_level)
 database_path = os.environ.get("ARCHIVE_BOT_DATABASE_PATH", cmd_args.database_path)
+storage_path = os.environ.get("ARCHIVE_BOT_STORAGE_PATH", cmd_args.storage_path)
 port = os.environ.get("ARCHIVE_BOT_PORT", cmd_args.port)
 
 # Setup logging
@@ -41,6 +50,10 @@ app = App(
     signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
     logger=logger,
 )
+
+storage_handlers = {}
+
+storage_handlers['file'] = JsonFiles(storage_path)
 
 # Save the bot user's user ID
 app._bot_user_id = app.client.auth_test()["user_id"]
@@ -343,6 +356,11 @@ def handle_message(message, say):
         permalink = app.client.chat_getPermalink(
             channel=message["channel"], message_ts=message["ts"]
         )
+
+        msg = SlackMessage(message)
+        msg.set_permalink(permalink["permalink"])
+        storage_handlers["file"].save_message(msg)
+
         logger.debug(permalink["permalink"])
         cursor.execute(
             "INSERT INTO messages VALUES(?, ?, ?, ?, ?)",
@@ -377,7 +395,17 @@ def handle_message_thread_broadcast(event, say):
 
 @app.event({"type": "message", "subtype": "message_changed"})
 def handle_message_changed(event):
+    logger.debug(event)
     message = event["message"]
+
+    msg = SlackMessage(message, channel=event["channel"])
+    permalink = app.client.chat_getPermalink(
+        channel     = message["channel"],
+        message_ts  = message["ts"]
+    )
+    msg.set_permalink(permalink["permalink"])
+    storage_handlers["file"].save_message(msg)
+
     conn, cursor = db_connect(database_path)
     cursor.execute(
         "UPDATE messages SET message = ? WHERE user = ? AND channel = ? AND timestamp = ?",
