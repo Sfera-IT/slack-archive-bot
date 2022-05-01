@@ -54,9 +54,12 @@ def update_users(conn, cursor):
 
     args = []
     for m in info["members"]:
+        name = m["profile"]["display_name"]
+        if not name:
+            name = m["profile"]["real_name"]
         args.append(
             (
-                m["profile"]["display_name"],
+                name,
                 m["id"],
                 m["profile"].get(
                     "image_72",
@@ -345,6 +348,8 @@ def handle_channel_name():
 def handle_user_change(event):
     user_id = event["user"]["id"]
     new_username = event["user"]["profile"]["display_name"]
+    if not new_username:
+        new_username = event["user"]["profile"]["real_name"]
 
     conn, cursor = db_connect(database_path)
     cursor.execute("UPDATE users SET name = ? WHERE id = ?", (new_username, user_id))
