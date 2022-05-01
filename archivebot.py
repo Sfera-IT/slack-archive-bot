@@ -137,6 +137,23 @@ def handle_query(event, cursor, say):
         limit = 10
 
         s = event["text"].lower()
+        
+        # take into account this example
+        # s = '"from:Fabio Lombardo" this is a test'
+        # 
+        # the original function simply use s.split() (split whitespaces), the result would have been:
+        # ['"from:fabio', 'lombardo"', 'this', 'is', 'a', 'test']
+        # and after, the text to be searched is re-assembled as 'lombardo" this is a test' with the parameter 'from:fabio'
+        # 
+        # the updated version changes approach:
+        # string is split over double quotes with s.split('"')
+        # ['', 'from:fabio lombardo', ' this is a test']
+        # we iterate over each array element with "for s in ..." and exclude empty values with "if s not in ('')"
+        # then, for each element, we format a new string, stripping spaces left/right
+        # final result is 
+        # ['from:fabio lombardo', 'this is a test']
+        l = ['{}'.format(s).rstrip().lstrip() for s in s.split('"') if s not in ('')]
+
         params = ['{}'.format(s).rstrip().lstrip() for s in s.split('"') if s not in ('', ', ')]
         if len(params) == 1:
             if params[0] == "!help":
