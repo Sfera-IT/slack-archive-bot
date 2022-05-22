@@ -143,21 +143,9 @@ def handle_query(event, cursor, say):
 
         s = event["text"].lower()
         
-        # take into account this example
-        # s = '"from:Fabio Lombardo" this is a test'
-        # 
-        # the original function simply use s.split() (split whitespaces), the result would have been:
-        # ['"from:fabio', 'lombardo"', 'this', 'is', 'a', 'test']
-        # and after, the text to be searched is re-assembled as 'lombardo" this is a test' with the parameter 'from:fabio'
-        # 
-        # the updated version changes approach:
-        # string is split over double quotes with s.split('"')
-        # ['', 'from:fabio lombardo', ' this is a test']
-        # we iterate over each array element with "for s in ..." and exclude empty values with "if s not in ('')"
-        # then, for each element, we format a new string, stripping spaces left/right
-        # final result is 
-        # ['from:fabio lombardo', 'this is a test']
-
+        # split except when surrounded by quotes
+        # john doe is splitted in 'john' and 'doe'
+        # 'john doe' is splitted in 'john doe'
         params = shlex.split(s)
 
         if len(params) == 1:
