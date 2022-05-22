@@ -134,7 +134,7 @@ def handle_query(event, cursor, say):
         limit: The number of responses to return. Default 10.
     """
     try:
-        usage_text= "Usage:\n\n\t<query> from:<user> in:<channel> sort:asc|desc limit:<number>\n\n\tquery: The text to search for.\n\tuser: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way 'from:\"name surname\" query' \n\tchannel: If you want to limit the search to one channel, the channel name.\n\tsort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\tlimit: The number of responses to return. Default 10."
+        usage_text= "Usage:\n\n\t<query> from:<user> in:<channel> sort:asc|desc limit:<number>\n\nNOTE: if your content contains quotes, escape it with a \\ slash before like this: I\\'m \n\n\tquery: The text to search for.\n\tuser: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way 'from:\"name surname\" query' \n\tchannel: If you want to limit the search to one channel, the channel name.\n\tsort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\tlimit: The number of responses to return. Default 10."
         text = []
         user_name = None
         channel_name = None
