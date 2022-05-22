@@ -2,6 +2,8 @@ import argparse
 import logging
 import os
 import traceback
+import shlex
+
 
 from slack_bolt import App
 
@@ -132,7 +134,7 @@ def handle_query(event, cursor, say):
         limit: The number of responses to return. Default 10.
     """
     try:
-        usage_text= "Usage:\n\n\t<query> from:<user> in:<channel> sort:asc|desc limit:<number>\n\n\tquery: The text to search for.\n\tuser: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way '\"from:name surname\" query' \n\tchannel: If you want to limit the search to one channel, the channel name.\n\tsort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\tlimit: The number of responses to return. Default 10."
+        usage_text= "Usage:\n\n\t<query> from:<user> in:<channel> sort:asc|desc limit:<number>\n\n\tquery: The text to search for.\n\tuser: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way 'from:\"name surname\" query' \n\tchannel: If you want to limit the search to one channel, the channel name.\n\tsort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\tlimit: The number of responses to return. Default 10."
         text = []
         user_name = None
         channel_name = None
@@ -155,9 +157,9 @@ def handle_query(event, cursor, say):
         # then, for each element, we format a new string, stripping spaces left/right
         # final result is 
         # ['from:fabio lombardo', 'this is a test']
-        l = ['{}'.format(s).rstrip().lstrip() for s in s.split('"') if s not in ('')]
 
-        params = ['{}'.format(s).rstrip().lstrip() for s in s.split('"') if s not in ('', ', ')]
+        params = shlex.split(s)
+
         if len(params) == 1:
             if params[0] == "!help":
                 say(usage_text)
