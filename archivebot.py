@@ -2,6 +2,8 @@ import argparse
 import logging
 import os
 import traceback
+import shlex
+
 from archivebot.storage import JsonFiles
 from archivebot.utility import SlackMessage
 
@@ -67,9 +69,12 @@ def update_users(conn, cursor):
 
     args = []
     for m in info["members"]:
+        name = m["profile"]["display_name"]
+        if not name:
+            name = m["profile"]["real_name"]
         args.append(
             (
-                m["profile"]["display_name"],
+                name,
                 m["id"],
                 m["profile"].get(
                     "image_72",
@@ -142,13 +147,25 @@ def handle_query(event, cursor, say):
         limit: The number of responses to return. Default 10.
     """
     try:
+        usage_text= "*Usage*:\n\n\t<query> from:<user> in:<channel> sort:asc|desc limit:<number>\n\n\n*NOTE*: \n\n 1) the BOT search all the terms, if you want to search for the exact phrase use quotes around the 'search terms' \n\n2) if your search term contains quotes, escape it with a \\ slash before, like this: I\\'m \n\n\n*Params*\n\n\tquery: The text to search for.\n\tuser: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way 'from:\"name surname\" query' \n\tchannel: If you want to limit the search to one channel, the channel name.\n\tsort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\tlimit: The number of responses to return. Default 10."
         text = []
         user_name = None
         channel_name = None
         sort = None
         limit = 10
 
-        params = event["text"].lower().split()
+        s = event["text"].lower()
+        
+        # split except when surrounded by quotes
+        # john doe is splitted in 'john' and 'doe'
+        # 'john doe' is splitted in 'john doe'
+        params = shlex.split(s)
+
+        if len(params) == 1:
+            if params[0] == "!help":
+                say(usage_text)
+                return None
+
         for p in params:
             # Handle emoji
             # usual format is " :smiley_face: "
@@ -192,12 +209,23 @@ def handle_query(event, cursor, say):
             WHERE
                 -- Only return messages that are in public channels or the user is a member of
                 (channels.is_private <> 1 OR members.user = (?)) AND
-                messages.message LIKE (?)
+                
         """
-        query_args = [app._bot_user_id, event["user"], "%" + " ".join(text) + "%"]
+
+        # Search for each search term in any order, duplicating the LIKE clause for each text element
+        text = ['%'+item+'%' for item in text]
+        elements = len(text)
+        message_str = 'messages.message LIKE (?) AND ' * elements
+        # remove last AND
+        message_str = message_str[:len(message_str) - 5]
+        # concatenate the clause
+        query = query + message_str
+        query_args = [app._bot_user_id, event["user"]]
+        # add the arguments for the parametrized query
+        query_args.extend(text)
 
         if user_name:
-            query += " AND users.name = (?)"
+            query += " AND users.name LIKE (?)"
             query_args.append(user_name)
         if channel_name:
             query += " AND channels.name = (?)"
@@ -228,7 +256,7 @@ def handle_query(event, cursor, say):
         if res_message:
             say(res_message)
         else:
-            say("No results found")
+            say("No results found\n\n"+usage_text)
     except ValueError as e:
         logger.error(traceback.format_exc())
         say(str(e))
@@ -334,6 +362,8 @@ def handle_channel_name():
 def handle_user_change(event):
     user_id = event["user"]["id"]
     new_username = event["user"]["profile"]["display_name"]
+    if not new_username:
+        new_username = event["user"]["profile"]["real_name"]
 
     conn, cursor = db_connect(database_path)
     cursor.execute("UPDATE users SET name = ? WHERE id = ?", (new_username, user_id))
