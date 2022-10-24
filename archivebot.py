@@ -233,7 +233,7 @@ def handle_query(event, cursor, say):
         cursor.close()
         res_message = None
         if res:
-            logger.debug(res)
+            res = tuple(map(get_first_reply_in_thread, res))
             res = tuple(map(get_permalink_and_save, res))
             logger.debug("debugging res")
             logger.debug(res)
@@ -262,6 +262,24 @@ def quote_message(msg: str) -> str:
     """
     return "> ".join(msg.splitlines(True))
 
+def get_first_reply_in_thread(res):
+    # get all ther replies of the message
+    replies = app.client.conversations_replies(channel=res[3], ts=res[2])
+
+    # if we have at least one reply
+    if len(replies.data["messages"]) > 0:
+        # if the timestamp of the actual message is equal to thread_ts of the first message in the replies, it means 
+        # that it's the main (parent) message. 
+        if res[2] == replies.data["messages"][0]["thread_ts"]:
+            # since main (parent) message cannot be referenced via permalink in Slack Free, we point the permalink 
+            # to the first child
+            if len(replies.data["messages"]) > 1:
+                # get the timestamp of the first reply and replace the link to it
+                reslist = list(res)
+                reslist[2] = replies.data["messages"][1]["ts"]
+                res = tuple(reslist)
+
+    return res
 
 def get_permalink_and_save(res):
     if res[4] == "":
