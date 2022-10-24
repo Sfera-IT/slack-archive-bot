@@ -278,15 +278,16 @@ def get_first_reply_in_thread(res):
     # if we have at least one reply
     if len(replies.data["messages"]) > 0:
         # if the timestamp of the actual message is equal to thread_ts of the first message in the replies, it means 
-        # that it's the main (parent) message. 
-        if res[2] == replies.data["messages"][0]["thread_ts"]:
-            # since main (parent) message cannot be referenced via permalink in Slack Free, we point the permalink 
-            # to the first child
-            if len(replies.data["messages"]) > 1:
-                # get the timestamp of the first reply and replace the link to it
-                reslist = list(res)
-                reslist[2] = replies.data["messages"][1]["ts"]
-                res = tuple(reslist)
+        # that it's the main (parent) message.
+        if "thread_ts" in replies.data["messages"][0]:
+            if res[2] == replies.data["messages"][0]["thread_ts"]:
+                # since main (parent) message cannot be referenced via permalink in Slack Free, we point the permalink 
+                # to the first child
+                if len(replies.data["messages"]) > 1:
+                    # get the timestamp of the first reply and replace the link to it
+                    reslist = list(res)
+                    reslist[2] = replies.data["messages"][1]["ts"]
+                    res = tuple(reslist)
 
     return res
 
