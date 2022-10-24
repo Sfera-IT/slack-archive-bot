@@ -178,6 +178,10 @@ def handle_query(event, cursor, say):
             if len(p) == 1:
                 text.append(p[0])
             if len(p) == 2:
+                # workaround: since url contains colons ":" the split interpret it as a parameter
+                # so we re-assemble it
+                if p[0] in ['<http', '<https', 'http', 'https']:
+                    text.append(p[0]+":"+p[1])
                 if p[0] == "from":
                     user_name = p[1]
                 if p[0] == "in":
