@@ -183,6 +183,9 @@ def handle_query(event, cursor, say):
                         limit = int(p[1])
                     except:
                         raise ValueError("%s not a valid number" % p[1])
+                if p[0] == "maintenance":
+                    say(maintenance(p[1]))
+                    return
 
         query = f"""
             SELECT DISTINCT
@@ -233,7 +236,6 @@ def handle_query(event, cursor, say):
         cursor.close()
         res_message = None
         if res:
-            res = tuple(map(get_first_reply_in_thread, res))
             res = tuple(map(get_permalink_and_save, res))
             logger.debug("debugging res")
             logger.debug(res)
@@ -252,6 +254,13 @@ def handle_query(event, cursor, say):
         logger.error(traceback.format_exc())
         say(str(e))
 
+def maintenance(msg: str) -> str:
+    if msg == "delete_permalinks":
+        conn, cursor = db_connect(database_path)
+        cursor.execute("update messages set permalink = ''")
+        conn.commit()
+        return "permalinks deleted"
+    return "no maintenance executed"
 
 def quote_message(msg: str) -> str:
     """
@@ -283,11 +292,12 @@ def get_first_reply_in_thread(res):
 
 def get_permalink_and_save(res):
     if res[4] == "":
+        newres = get_first_reply_in_thread(res)
         logger.debug("Getting Permalink for res: ")
         logger.debug(res)
         conn, cursor = db_connect(database_path)
 
-        permalink = app.client.chat_getPermalink(channel=res[3], message_ts=res[2])
+        permalink = app.client.chat_getPermalink(channel=newres[3], message_ts=newres[2])
         logger.debug(permalink["permalink"])
         res = res[:-1]
         res = res + (permalink["permalink"],)
@@ -392,9 +402,14 @@ def handle_message(message, say):
     elif "user" not in message:
         logger.warning("No valid user. Previous event not saved")
     else:  # Otherwise save the message to the archive.
-        permalink = app.client.chat_getPermalink(
-            channel=message["channel"], message_ts=message["ts"]
-        )
+        # get the permalink only if the message is not the main post (slack bug), otherwise leave it empty
+        if "thread_ts" in message:
+            permalink = app.client.chat_getPermalink(
+                channel=message["channel"], message_ts=message["ts"]
+            )
+        else:
+            permalink = {'permalink': ''}
+
         logger.debug(permalink["permalink"])
         cursor.execute(
             "INSERT INTO messages VALUES(?, ?, ?, ?, ?)",
