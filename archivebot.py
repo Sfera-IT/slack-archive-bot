@@ -132,6 +132,9 @@ def handle_query(event, cursor, say):
         sort: Either asc if you want to search starting with the oldest messages,
             or desc if you want to start from the newest. Default asc.
         limit: The number of responses to return. Default 10.
+
+    Special Commands (not returned in usage_text):
+        inactive:N Returns the users inactive in the last N days (no messages sent). Example inactive:30
     """
     try:
         usage_text= "*Usage*:\n\n\t<query> from:<user> in:<channel> sort:asc|desc limit:<number>\n\n\n*NOTE*: \n\n 1) the BOT search all the terms, if you want to search for the exact phrase use quotes around the 'search terms' \n\n2) if your search term contains quotes, escape it with a \\ slash before, like this: I\\'m \n\n\n*Params*\n\n\tquery: The text to search for.\n\tuser: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way 'from:\"name surname\" query' \n\tchannel: If you want to limit the search to one channel, the channel name.\n\tsort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\tlimit: The number of responses to return. Default 10."
@@ -185,6 +188,9 @@ def handle_query(event, cursor, say):
                         raise ValueError("%s not a valid number" % p[1])
                 if p[0] == "maintenance":
                     say(maintenance(p[1]))
+                    return
+                if p[0] == "inactive":
+                    say(inactive(p[1]))
                     return
 
         query = f"""
@@ -261,6 +267,17 @@ def maintenance(msg: str) -> str:
         conn.commit()
         return "permalinks deleted"
     return "no maintenance executed"
+
+def inactive(days: str) -> str:
+    conn, cursor = db_connect(database_path)
+    query = "select group_concat(name, ', ') from users where id not in (select distinct user from messages where datetime(timestamp, 'unixepoch') > date('now', ?) order by timestamp desc)";
+    query_args = ['-'+days+' days']
+    cursor.execute(query, query_args)
+    res = cursor.fetchone()
+    if len(res) > 0:
+        return res[0]
+    else:
+        return "Something went wrong"
 
 def quote_message(msg: str) -> str:
     """
