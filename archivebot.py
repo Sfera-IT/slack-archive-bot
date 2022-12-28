@@ -225,10 +225,10 @@ def handle_query(event, cursor, say):
         query_args.extend(text)
 
         if user_name:
-            query += " AND users.name LIKE (?)"
+            query += " users.name LIKE (?)"
             query_args.append(user_name)
         if channel_name:
-            query += " AND channels.name = (?)"
+            query += " channels.name = (?)"
             query_args.append(channel_name)
         if sort:
             query += " ORDER BY messages.timestamp %s" % sort
