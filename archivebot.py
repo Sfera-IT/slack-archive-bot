@@ -137,7 +137,16 @@ def handle_query(event, cursor, say):
         inactive:N Returns the users inactive in the last N days (no messages sent). Example inactive:30
     """
     try:
-        usage_text= "*Usage*:\n\n\t<query> from:<user> in:<channel> sort:asc|desc limit:<number>\n\n\n*NOTE*: \n\n 1) the BOT search all the terms, if you want to search for the exact phrase use quotes around the 'search terms' \n\n2) if your search term contains quotes, escape it with a \\ slash before, like this: I\\'m \n\n\n*Params*\n\n\tquery: The text to search for.\n\tuser: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way 'from:\"name surname\" query' \n\tchannel: If you want to limit the search to one channel, the channel name.\n\tsort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\tlimit: The number of responses to return. Default 10."
+        usage_text= "*Usage*:\n\n\t"\
+                    "<query> from:<user> in:<channel> sort:asc|desc limit:<number>\n\n\n*"\
+                    "NOTE*: \n\n 1) the BOT search all the terms, if you want to search for the exact phrase use quotes around the 'search terms' \n\n"\
+                    "2) if your search term contains quotes, escape it with a \\ slash before, like this: I\\'m \n\n\n"\
+                    "*Params*\n\n\t"\
+                    "query: The text to search for.\n\t"\
+                    "user: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way 'from:\"name surname\" query' \n\t"\
+                    "channel: If you want to limit the search to one channel, the channel name.\n\t"\
+                    "sort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\t"\
+                    "limit: The number of responses to return. Default 10.\n\n\n"
         text = []
         user_name = None
         channel_name = None
@@ -192,6 +201,8 @@ def handle_query(event, cursor, say):
                 if p[0] == "inactive":
                     say(inactive(p[1]))
                     return
+                if p[0] == "oblivion":
+                    say(oblivion(p[1]))
 
         query = f"""
             SELECT DISTINCT
@@ -278,6 +289,15 @@ def inactive(days: str) -> str:
         return res[0]
     else:
         return "Something went wrong"
+
+def oblivion(msg: str) -> str:
+    if msg != "confirm":
+        return "This command WILL DELETE ALL YOUR POST IN THE DATABASE of the BOT, and it will be impossible to recover them again. If you are sure, repeat the command again using oblivion:confirm"
+    else:
+        conn, cursor = db_connect(database_path)
+        # cursor.execute("update messages set permalink = ''")
+        # conn.commit()
+        return "Chi sei?"
 
 def quote_message(msg: str) -> str:
     """
