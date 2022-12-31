@@ -195,9 +195,9 @@ def handle_query(event, cursor, say):
                         limit = int(p[1])
                     except:
                         raise ValueError("%s not a valid number" % p[1])
-                if p[0] == "maintenance":
-                    say(maintenance(p[1]))
-                    return
+                # if p[0] == "maintenance":
+                #     say(maintenance(p[1]))
+                #     return
                 if p[0] == "inactive":
                     say(inactive(p[1]))
                     return
