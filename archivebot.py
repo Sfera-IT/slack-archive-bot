@@ -135,6 +135,7 @@ def handle_query(event, cursor, say):
 
     Special Commands (not returned in usage_text):
         inactive:N Returns the users inactive in the last N days (no messages sent). Example inactive:30
+        topusers:N Shows a list of the most active users (number of messages sent) on the last N days
     """
     try:
         usage_text= "*Usage*:\n\n\t"\
@@ -146,7 +147,10 @@ def handle_query(event, cursor, say):
                     "user: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way 'from:\"name surname\" query' \n\t"\
                     "channel: If you want to limit the search to one channel, the channel name.\n\t"\
                     "sort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\t"\
-                    "limit: The number of responses to return. Default 10.\n\n\n"
+                    "limit: The number of responses to return. Default 10.\n\n\n"\
+                    "*Special Commands*\n\n\t"\
+                    "topusers:N Shows a list of the most active users (number of messages sent) on the last N days"
+
         text = []
         user_name = None
         channel_name = None
@@ -201,8 +205,11 @@ def handle_query(event, cursor, say):
                 if p[0] == "inactive":
                     say(inactive(p[1]))
                     return
-                if p[0] == "oblivion":
-                    say(oblivion(p[1]))
+                if p[0] == "topusers":
+                    say(topusers(p[1]))
+                    return
+                # if p[0] == "oblivion":
+                #     say(oblivion(p[1]))
 
         query = f"""
             SELECT DISTINCT
@@ -285,6 +292,21 @@ def maintenance(msg: str) -> str:
 def inactive(days: str) -> str:
     conn, cursor = db_connect(database_path)
     query = "select group_concat(name, ', ') from users where id not in (select distinct user from messages where datetime(timestamp, 'unixepoch') > date('now', ?) order by timestamp desc)";
+    query_args = ['-'+days+' days']
+    cursor.execute(query, query_args)
+    res = cursor.fetchone()
+    if len(res) > 0:
+        return res[0]
+    else:
+        return "Something went wrong"
+
+
+def topusers(days: str) -> str:
+    conn, cursor = db_connect(database_path)
+    query = f"""    select group_concat(name || ': ' || messaggi, '\n') from (
+	                    select name, count(*) as messaggi from users inner join messages on users.id = messages.user where datetime(timestamp, 'unixepoch') > date('now', ?) group by name order by count(*) desc
+                    ) as t1
+            """
     query_args = ['-'+days+' days']
     cursor.execute(query, query_args)
     res = cursor.fetchone()
