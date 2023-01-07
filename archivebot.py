@@ -290,6 +290,11 @@ def maintenance(msg: str) -> str:
     return "no maintenance executed"
 
 def inactive(days: str) -> str:
+    try:                
+        days = str(int(days))
+    except:
+        raise ValueError("%s not a valid number" % days)
+
     conn, cursor = db_connect(database_path)
     query = "select group_concat(name, ', ') from users where id not in (select distinct user from messages where datetime(timestamp, 'unixepoch') > date('now', ?) order by timestamp desc)";
     query_args = ['-'+days+' days']
@@ -302,6 +307,11 @@ def inactive(days: str) -> str:
 
 
 def topusers(days: str) -> str:
+    try:                
+        days = str(int(days))
+    except:
+        raise ValueError("%s not a valid number" % days)
+    
     conn, cursor = db_connect(database_path)
     query = f"""    select group_concat(name || ': ' || messaggi, '\n') from (
 	                    select name, count(*) as messaggi from users inner join messages on users.id = messages.user where datetime(timestamp, 'unixepoch') > date('now', ?) group by name order by count(*) desc
