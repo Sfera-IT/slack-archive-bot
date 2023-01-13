@@ -149,7 +149,8 @@ def handle_query(event, cursor, say):
                     "sort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\t"\
                     "limit: The number of responses to return. Default 10.\n\n\n"\
                     "*Special Commands*\n\n\t"\
-                    "topusers:N Shows a list of the most active users (number of messages sent) on the last N days"
+                    "!topusers:N Shows a list of the most active users (number of messages sent) on the last N days\n\t"\
+                    "!inactive:N Shows a list of the inactive users (no messages) on the last N days"
 
         text = []
         user_name = None
@@ -202,10 +203,10 @@ def handle_query(event, cursor, say):
                 # if p[0] == "maintenance":
                 #     say(maintenance(p[1]))
                 #     return
-                if p[0] == "inactive":
+                if p[0] == "!inactive":
                     say(inactive(p[1]))
                     return
-                if p[0] == "topusers":
+                if p[0] == "!topusers":
                     say(topusers(p[1]))
                     return
                 # if p[0] == "oblivion":
