@@ -149,7 +149,7 @@ def handle_query(event, cursor, say):
                     "sort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\t"\
                     "limit: The number of responses to return. Default 10.\n\n\n"\
                     "*Special Commands*\n\n\t"\
-                    "!topusers:N Shows a list of the most active users (number of messages sent) on the last N days\n\t"\
+                    "!topusers:N Shows a list of the most active users (number of messages sent) on the last N days + bonus info :-) \n\t"\
                     "!inactive:N Shows a list of the inactive users (no messages) on the last N days"
 
         text = []
@@ -314,9 +314,24 @@ def topusers(days: str) -> str:
         raise ValueError("%s not a valid number" % days)
     
     conn, cursor = db_connect(database_path)
-    query = f"""    select group_concat(name || ': ' || messaggi, '\n') from (
-	                    select name, count(*) as messaggi from users inner join messages on users.id = messages.user where datetime(timestamp, 'unixepoch') > date('now', ?) group by name order by count(*) desc
-                    ) as t1
+    query = f"""    
+    SELECT group_concat(name || ': ' || messaggi || ', rants: ' || rants || ' praises: ' || praises, '\n') FROM (
+        SELECT 
+            users.name,
+            count(*) messaggi, 
+            SUM(IIF(channels.name = "rants", TRUE, NULL)) rants,
+            SUM(IIF(channels.name = "praise", TRUE, NULL)) praises
+        FROM users 
+        INNER JOIN messages 
+            ON users.id = messages.user 
+        INNER JOIN channels 
+            ON channels.id = messages.channel 
+        WHERE 
+            datetime(timestamp, 'unixepoch') > date('now', ?)
+        GROUP BY users.name 
+        ORDER BY count(*) DESC
+    ) AS t1;
+
             """
     query_args = ['-'+days+' days']
     cursor.execute(query, query_args)
