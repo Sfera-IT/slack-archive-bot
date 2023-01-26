@@ -319,8 +319,8 @@ def topusers(days: str) -> str:
         SELECT 
             users.name,
             count(*) messaggi, 
-            SUM(IIF(channels.name = "rants", TRUE, NULL)) rants,
-            SUM(IIF(channels.name = "praise", TRUE, NULL)) praises
+            SUM(IIF(channels.name = "rants", 1, 0)) rants,
+            SUM(IIF(channels.name = "praise", 1, 0)) praises
         FROM users 
         INNER JOIN messages 
             ON users.id = messages.user 
