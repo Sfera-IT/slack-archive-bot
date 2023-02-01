@@ -275,6 +275,8 @@ def handle_query(event, cursor, say):
                 ]
             )
         if res_message:
+            # replace everyone tag breaking everything
+            res_message.replace("<!everyone>", "everyone")
             say(res_message)
         else:
             say("No results found\n\n"+usage_text)
