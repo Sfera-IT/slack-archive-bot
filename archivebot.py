@@ -505,13 +505,14 @@ def handle_message(message, say):
 
         logger.debug(permalink["permalink"])
         cursor.execute(
-            "INSERT INTO messages VALUES(?, ?, ?, ?, ?)",
+            "INSERT INTO messages VALUES(?, ?, ?, ?, ?, ?)",
             (
                 message["text"],
                 message["user"],
                 message["channel"],
                 message["ts"],
                 permalink["permalink"],
+                message["thread_ts"] if "thread_ts" in message else None,
             ),
         )
         conn.commit()

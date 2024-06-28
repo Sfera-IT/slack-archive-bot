@@ -58,6 +58,20 @@ def migrate_db(conn, cursor):
         pass
 
 
+    # Add `thread_ts` to messages
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE messages
+            ADD COLUMN thread_ts TEXT default NULL
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
+
+
 def db_connect(database_path):
     conn = sqlite3.connect(database_path)
     cursor = conn.cursor()
