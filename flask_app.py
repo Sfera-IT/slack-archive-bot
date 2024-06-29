@@ -143,11 +143,21 @@ def whoami():
 def optout():
     headers = get_slack_headers()
     user = verify_token_and_get_user(headers)
-    conn = get_db_connection()
-    conn.cursor().execute('INSERT INTO optout (user, timestamp) VALUES (?,CURRENT_TIMESTAMP) ', (user,))
-    conn.close()
     if not headers or not user:
         return redirect(url_for('login'))
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
+        conn.commit()
+    except Exception as e:
+        # Log the exception e
+        conn.rollback()
+        return get_response({'error': 'Database error'})
+    finally:
+        conn.close()
+
     return get_response({'user_id': user, 'opted_out': True})
 
 @flask_app.route('/channels', methods=['GET'])
