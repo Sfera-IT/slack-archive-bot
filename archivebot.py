@@ -561,8 +561,12 @@ def init():
     migrate_db(conn, cursor)
 
     # Update the users and channels in the DB and in the local memory mapping
-    update_users(conn, cursor)
-    update_channels(conn, cursor)
+    try:
+        update_users(conn, cursor)
+        update_channels(conn, cursor)
+    except Exception as e:
+        logger.error("Error updating users and channels: %s" % e)
+        
 
 
 def main():
