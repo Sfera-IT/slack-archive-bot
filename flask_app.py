@@ -144,13 +144,11 @@ def optout():
     headers = get_slack_headers()
     user = verify_token_and_get_user(headers)
     conn = get_db_connection()
-    status = conn.execute('INSERT INTO optout (user, timestamp) VALUES (?,CURRENT_TIMESTAMP) ', (user,)).fetchone()
+    conn.cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?,CURRENT_TIMESTAMP) ', (user,))
     conn.close()
     if not headers or not user:
         return redirect(url_for('login'))
-    if status:
-        return get_response({'user_id': user, 'opted_out': True})
-    return get_response({'user_id': user, 'opted_out': False})
+    return get_response({'user_id': user, 'opted_out': True})
 
 @flask_app.route('/channels', methods=['GET'])
 def get_channels():
