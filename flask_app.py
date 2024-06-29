@@ -147,16 +147,21 @@ def optout():
         return redirect(url_for('login'))
 
     conn = get_db_connection()
+    cursor = None
     try:
-        with conn.cursor() as cursor:
-            cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
         conn.commit()
     except Exception as e:
         # return the exception as an error
-        conn.rollback()
+        if conn:
+            conn.rollback()
         return get_response({'error': str(e)})
     finally:
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
     return get_response({'user_id': user, 'opted_out': True})
 
