@@ -144,7 +144,7 @@ def optout():
     headers = get_slack_headers()
     user = verify_token_and_get_user(headers)
     conn = get_db_connection()
-    conn.cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?,CURRENT_TIMESTAMP) ', (user,))
+    conn.cursor().execute('INSERT INTO optout (user, timestamp) VALUES (?,CURRENT_TIMESTAMP) ', (user,))
     conn.close()
     if not headers or not user:
         return redirect(url_for('login'))
