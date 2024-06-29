@@ -131,7 +131,7 @@ def whoami():
     headers = get_slack_headers()
     user = verify_token_and_get_user(headers)
     conn = get_db_connection()
-    status = conn.execute('SELECT * FROM optout WHERE user = ?', (user)).fetchone()
+    status = conn.execute('SELECT * FROM optout WHERE user = ?', (user,)).fetchone()
     conn.close()
     if not headers or not user:
         return redirect(url_for('login'))
@@ -144,7 +144,7 @@ def optout():
     headers = get_slack_headers()
     user = verify_token_and_get_user(headers)
     conn = get_db_connection()
-    status = conn.execute('INSERT INTO optout (name, timestamp) VALUES (?,CURRENT_TIMESTAMP) ', (user)).fetchone()
+    status = conn.execute('INSERT INTO optout (name, timestamp) VALUES (?,CURRENT_TIMESTAMP) ', (user,)).fetchone()
     conn.close()
     if not headers or not user:
         return redirect(url_for('login'))
