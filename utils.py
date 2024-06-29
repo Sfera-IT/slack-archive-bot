@@ -70,6 +70,21 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # opt out table
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS optout (
+                user TEXT,
+                timestamp TEXT,
+                FOREIGN KEY (user) REFERENCES users(id)
+                UNIQUE(user, timestamp) ON CONFLICT REPLACE
+            )
+        """
+        )
+        conn.commit()
+    except:
+        pass
 
 
 def db_connect(database_path):
