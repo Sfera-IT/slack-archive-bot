@@ -36,7 +36,7 @@ def get_response(data):
 
 def get_db_connection():
     cur_dir = os.path.dirname(__file__)
-    conn = sqlite3.connect(cur_dir+'/db_thread.sqlite')
+    conn = sqlite3.connect('/data/slack.sqlite')
     conn.row_factory = sqlite3.Row
     return conn
 
