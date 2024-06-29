@@ -126,6 +126,32 @@ def verify_token_and_get_user(headers):
 def get_channels_options():
     return get_response({})
 
+@flask_app.route('/whoami', methods=['GET'])
+def whoami():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)
+    conn = get_db_connection()
+    status = conn.execute('SELECT * FROM optout WHERE user = ?', (user)).fetchone()
+    conn.close()
+    if not headers or not user:
+        return redirect(url_for('login'))
+    if status:
+        return get_response({'user_id': user, 'opted_out': True})
+    return get_response({'user_id': user, 'opted_out': False})
+
+@flask_app.route('/optout', methods=['GET'])
+def optout():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)
+    conn = get_db_connection()
+    status = conn.execute('INSERT INTO optout (name, timestamp) VALUES (?,CURRENT_TIMESTAMP) ', (user)).fetchone()
+    conn.close()
+    if not headers or not user:
+        return redirect(url_for('login'))
+    if status:
+        return get_response({'user_id': user, 'opted_out': True})
+    return get_response({'user_id': user, 'opted_out': False})
+
 @flask_app.route('/channels', methods=['GET'])
 def get_channels():
     headers = get_slack_headers()
