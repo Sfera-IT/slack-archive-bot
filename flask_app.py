@@ -14,7 +14,7 @@ flask_app = Flask(__name__)
 flask_app.secret_key = os.getenv('SECRET_KEY')
 flask_app.config['PREFERRED_URL_SCHEME'] = 'https'
 
-# Attenzione, sono i dati dell'applicazione 
+# Attenzione, sono i dati dell'applicazione slack-archive-gui e non slack-archive-bot
 CLIENT_ID = os.getenv('CLIENT_ID')
 CLIENT_SECRET = os.getenv('CLIENT_SECRET')
 OAUTH_SCOPE = os.getenv('OAUTH_SCOPE')
@@ -26,12 +26,17 @@ CLIENT_URL = os.getenv('CLIENT_URL')
 def slack_events():
     return handler.handle(request)
 
-# api for the frontend
-def get_response(data):
-    response = jsonify(data)
+
+# Middleware per aggiungere le intestazioni CORS a tutte le risposte
+@flask_app.after_request
+def apply_cors_headers(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    return response
+
+def get_response(data):
+    response = jsonify(data)
     return response
 
 def get_db_connection():
