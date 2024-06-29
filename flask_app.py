@@ -153,6 +153,7 @@ def get_messages(channel_id):
         JOIN users ON messages.user = users.id 
         WHERE channel = ? 
         AND thread_ts is NULL
+        AND CAST(timestamp AS REAL) > 1719600000
         ORDER BY timestamp DESC 
         LIMIT ? OFFSET ?''', 
         (channel_id, limit, offset)).fetchall()
