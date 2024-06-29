@@ -70,7 +70,7 @@ def oauth_callback():
     session['access_token'] = response_data['access_token'] # Attenzione, è un token applicazione e non un token utente, preferisco recuperare l'utente e farmi il mio token jwt
 
     # create a jwt token
-    jwt_token = jwt.encode({'user_id': response_data['authed_user']['id']}, app.secret_key, algorithm='HS256')
+    jwt_token = jwt.encode({'user_id': response_data['authed_user']['id']}, flask_app.secret_key, algorithm='HS256')
     
     return redirect(CLIENT_URL + "?token="+jwt_token)
 
@@ -101,7 +101,7 @@ def verify_token_and_get_user(headers):
     token = token.split('Bearer ')[1]
 
     try:
-        decoded = jwt.decode(token, app.secret_key, algorithms=['HS256'])
+        decoded = jwt.decode(token, flask_app.secret_key, algorithms=['HS256'])
         user_id = decoded['user_id']
         # check if user_id exists in the database
         conn = get_db_connection()
@@ -192,4 +192,4 @@ def search_messages():
     return get_response([dict(ix) for ix in messages])
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    flask_app.run(debug=True)
