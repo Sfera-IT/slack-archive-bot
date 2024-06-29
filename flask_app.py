@@ -152,9 +152,9 @@ def optout():
             cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
         conn.commit()
     except Exception as e:
-        # Log the exception e
+        # return the exception as an error
         conn.rollback()
-        return get_response({'error': 'Database error'})
+        return get_response({'error': str(e)})
     finally:
         conn.close()
 
