@@ -7,6 +7,8 @@ import jwt
 from slack_bolt.adapter.flask import SlackRequestHandler
 from archivebot import app
 handler = SlackRequestHandler(app)
+import datetime
+
 
 load_dotenv()
 
@@ -74,8 +76,9 @@ def oauth_callback():
 
     session['access_token'] = response_data['access_token'] # Attenzione, è un token applicazione e non un token utente, preferisco recuperare l'utente e farmi il mio token jwt
 
-    # create a jwt token
-    jwt_token = jwt.encode({'user_id': response_data['authed_user']['id']}, flask_app.secret_key, algorithm='HS256')
+    # create a jwt token with expiration
+    exp_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=86400)
+    jwt_token = jwt.encode({'user_id': response_data['authed_user']['id'], 'exp': exp_time}, flask_app.secret_key, algorithm='HS256')
     
     return redirect(CLIENT_URL + "?token="+jwt_token)
 
@@ -193,6 +196,7 @@ def get_messages(channel_id):
         WHERE channel = ? 
         AND thread_ts is NULL
         AND CAST(timestamp AS REAL) > 1719600000
+        AND user NOT IN (SELECT user FROM optout)
         ORDER BY timestamp DESC 
         LIMIT ? OFFSET ?''', 
         (channel_id, limit, offset)).fetchall()
@@ -212,8 +216,9 @@ def get_thread(message_id):
         SELECT messages.*, users.name as user_name 
         FROM messages 
         JOIN users ON messages.user = users.id 
-        WHERE messages.timestamp = ?
-        OR messages.thread_ts = ?''', 
+        WHERE ( messages.timestamp = ? OR messages.thread_ts = ? )
+        AND user NOT IN (SELECT user FROM optout)                  
+        ''', 
         (message_id, message_id)).fetchall()
     conn.close()
     return get_response([dict(ix) for ix in thread])
@@ -231,7 +236,9 @@ def search_messages():
         SELECT messages.*, users.name as user_name 
         FROM messages 
         JOIN users ON messages.user = users.id 
-        WHERE message LIKE ?''', 
+        WHERE message LIKE ?
+        AND user NOT IN (SELECT user FROM optout)
+        ''', 
         ('%' + query + '%',)).fetchall()
     conn.close()
     return get_response([dict(ix) for ix in messages])
