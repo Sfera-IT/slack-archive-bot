@@ -270,10 +270,11 @@ def search_messages():
         SELECT messages.*, users.name as user_name 
         FROM messages 
         JOIN users ON messages.user = users.id 
-        WHERE message LIKE ?
+        WHERE (message LIKE ? OR users.name LIKE ?)
         AND user NOT IN (SELECT user FROM optout)
+        ORDER BY timestamp DESC
         ''', 
-        ('%' + query + '%',)).fetchall()
+        ('%' + query + '%','%' + query + '%',)).fetchall()
     conn.close()
     return get_response([dict(ix) for ix in messages])
 
