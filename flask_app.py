@@ -125,6 +125,12 @@ def verify_token_and_get_user(headers):
         return False
     return True
 
+def get_username(user):
+    conn = get_db_connection()
+    user = conn.execute('SELECT name FROM users WHERE id = ?', (user,)).fetchone()
+    conn.close()
+    return user['name']
+
 @flask_app.route('/channels', methods=['OPTIONS'])
 def get_channels_options():
     return get_response({})
@@ -133,14 +139,15 @@ def get_channels_options():
 def whoami():
     headers = get_slack_headers()
     user = verify_token_and_get_user(headers)
+    username = get_username(user)
     conn = get_db_connection()
     status = conn.execute('SELECT * FROM optout WHERE user = ?', (user,)).fetchone()
     conn.close()
     if not headers or not user:
         return redirect(url_for('login'))
     if status:
-        return get_response({'user_id': user, 'opted_out': True})
-    return get_response({'user_id': user, 'opted_out': False})
+        return get_response({'user_id': user, 'username': username, 'opted_out': True})
+    return get_response({'user_id': user, 'username': username, 'opted_out': False})
 
 @flask_app.route('/optout', methods=['GET'])
 def optout():
@@ -167,6 +174,33 @@ def optout():
             conn.close()
 
     return get_response({'user_id': user, 'opted_out': True})
+
+
+@flask_app.route('/optin', methods=['GET'])
+def optin():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)
+    if not headers or not user:
+        return redirect(url_for('login'))
+
+    conn = get_db_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM optout WHERE user = ?', (user,))
+        conn.commit()
+    except Exception as e:
+        # return the exception as an error
+        if conn:
+            conn.rollback()
+        return get_response({'error': str(e)})
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+    return get_response({'user_id': user, 'opted_out': False})
 
 @flask_app.route('/channels', methods=['GET'])
 def get_channels():
