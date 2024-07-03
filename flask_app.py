@@ -109,7 +109,7 @@ def verify_token_and_get_user(headers):
     token = token.split('Bearer ')[1]
 
     try:
-        decoded = jwt.decode(token, flask_app.secret_key, algorithms=['HS256'])
+        decoded = jwt.decode(token, flask_app.secret_key, algorithms=['HS256'], options={'verify_exp': True})
         user_id = decoded['user_id']
         # check if user_id exists in the database
         conn = get_db_connection()
