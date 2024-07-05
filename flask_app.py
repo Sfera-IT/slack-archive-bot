@@ -149,6 +149,14 @@ def whoami():
         return get_response({'user_id': user, 'username': username, 'opted_out': True})
     return get_response({'user_id': user, 'username': username, 'opted_out': False})
 
+
+def notify_users(users, text):
+    for user in users:
+        response = app.client.chat_postMessage(
+            channel=user,
+            text=text
+        )
+
 @flask_app.route('/optout', methods=['GET'])
 def optout():
     headers = get_slack_headers()
@@ -159,10 +167,15 @@ def optout():
     conn = get_db_connection()
     cursor = None
     try:
-        cursor = conn.cursor()
-        cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
-        cursor.execute('UPDATE messages SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?', (user,))
-        conn.commit()
+        # cursor = conn.cursor()
+        # cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
+        # cursor.execute('UPDATE messages SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?', (user,))
+        # conn.commit()
+
+        notify_users(
+            ['U011PQ7RHRT', 'U011PQ7RHRT'],
+            "L'utente <@" + user + "> ha scelto di non essere più archiviato."
+        )
 
     except Exception as e:
         # return the exception as an error
