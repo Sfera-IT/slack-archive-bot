@@ -173,8 +173,17 @@ def optout():
         # conn.commit()
 
         notify_users(
-            ['U011PQ7RHRT', 'U011PQ7RHRT'],
-            "L'utente <@" + user + "> ha scelto di non essere più archiviato."
+            [
+                'U011PQ7RHRT',
+                'U011MV24J2W',
+                'U0129HFHRJ4',
+                'U011N8WRRD0',
+                'U011Z26G449',
+                'U011CKQ7D71',
+                'U011KE4BF0W',
+                'U011PN35BHT'
+                ],
+            "(questo è solo un test) L'utente <@" + user + "> ha scelto di non essere più archiviato. (questo è solo un test)"
         )
 
     except Exception as e:
