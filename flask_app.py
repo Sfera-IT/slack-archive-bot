@@ -161,7 +161,9 @@ def optout():
     try:
         cursor = conn.cursor()
         cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
+        cursor.execute('UPDATE messages_test SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?', (user,))
         conn.commit()
+
     except Exception as e:
         # return the exception as an error
         if conn:
@@ -175,33 +177,6 @@ def optout():
 
     return get_response({'user_id': user, 'opted_out': True})
 
-
-@flask_app.route('/optin', methods=['GET'])
-def optin():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)
-    if not headers or not user:
-        return redirect(url_for('login'))
-
-    conn = get_db_connection()
-    cursor = None
-    try:
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM optout WHERE user = ?', (user,))
-        conn.commit()
-    except Exception as e:
-        # return the exception as an error
-        if conn:
-            conn.rollback()
-        return get_response({'error': str(e)})
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-    return get_response({'user_id': user, 'opted_out': False})
-
 @flask_app.route('/channels', methods=['GET'])
 def get_channels():
     headers = get_slack_headers()
@@ -213,12 +188,23 @@ def get_channels():
     conn.close()
     return get_response([dict(ix) for ix in channels])
 
+def check_optout(user):
+    conn = get_db_connection()
+    status = conn.execute('SELECT * FROM optout WHERE user = ?', (user,)).fetchone()
+    conn.close()
+    if status:
+        return True
+    return False
+
 @flask_app.route('/messages/<channel_id>', methods=['GET'])
 def get_messages(channel_id):
     headers = get_slack_headers()
     user = verify_token_and_get_user(headers)
     if not headers or not user:
         return redirect(url_for('login'))
+    
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
 
     conn = get_db_connection()
     offset = request.args.get('offset', 0)
@@ -243,6 +229,9 @@ def get_thread(message_id):
     user = verify_token_and_get_user(headers)
     if not headers or not user:
         return redirect(url_for('login'))
+    
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
 
     conn = get_db_connection()
     thread = conn.execute('''

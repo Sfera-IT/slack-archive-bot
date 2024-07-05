@@ -119,6 +119,8 @@ def update_channels(conn, cursor):
 
 
 def handle_query(event, cursor, say):
+    say("Questa interfaccia è stata disattivata. Ora puoi andare qui: https://sferaarchive-client.vercel.app/")
+    return
     """
     Handles a DM to the bot that is requesting a search of the archives.
 
@@ -502,6 +504,15 @@ def handle_message(message, say):
             )
         else:
             permalink = {'permalink': ''}
+
+        # Check if user opted out
+        cursor.execute("SELECT user, timestamp FROM optout WHERE user = ?", (message["user"],))
+        row = cursor.fetchone()
+
+        if row is not None:
+            message["text"] = "User opted out of archiving. This message has been deleted"
+            message["user"] = "USLACKBOT"
+            message["permalink"] = ""
 
         logger.debug(permalink["permalink"])
         cursor.execute(
