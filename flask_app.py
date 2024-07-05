@@ -251,6 +251,9 @@ def search_messages():
     user = verify_token_and_get_user(headers)
     if not headers or not user:
         return redirect(url_for('login'))
+    
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
 
     query = request.args.get('query', '')
     conn = get_db_connection()
