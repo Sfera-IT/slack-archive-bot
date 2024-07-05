@@ -229,7 +229,6 @@ def get_messages(channel_id):
         JOIN users ON messages.user = users.id 
         WHERE channel = ? 
         AND (thread_ts IS NULL OR thread_ts = timestamp)
-        AND CAST(timestamp AS REAL) > 1693382526
         AND user NOT IN (SELECT user FROM optout)
         ORDER BY timestamp DESC 
         LIMIT ? OFFSET ?''', 
