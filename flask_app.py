@@ -167,10 +167,10 @@ def optout():
     conn = get_db_connection()
     cursor = None
     try:
-        # cursor = conn.cursor()
-        # cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
-        # cursor.execute('UPDATE messages SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?', (user,))
-        # conn.commit()
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
+        cursor.execute('UPDATE messages SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?', (user,))
+        conn.commit()
 
         notify_users(
             [
@@ -183,7 +183,7 @@ def optout():
                 'U011KE4BF0W',
                 'U011PN35BHT'
                 ],
-            "(questo è solo un test) L'utente <@" + user + "> ha scelto di non essere più archiviato. (questo è solo un test)"
+            "L'utente <@" + user + "> ha scelto di non essere più archiviato."
         )
 
     except Exception as e:
