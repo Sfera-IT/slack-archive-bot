@@ -161,7 +161,7 @@ def optout():
     try:
         cursor = conn.cursor()
         cursor.execute('INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
-        cursor.execute('UPDATE messages_test SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?', (user,))
+        cursor.execute('UPDATE messages SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?', (user,))
         conn.commit()
 
     except Exception as e:
