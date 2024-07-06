@@ -291,5 +291,64 @@ def search_messages():
     conn.close()
     return get_response([dict(ix) for ix in messages])
 
+
+
+@flask_app.route('/searchV2', methods=['GET'])
+def search_messages_V2():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)
+    if not headers or not user:
+        return redirect(url_for('login'))
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
+
+    # Get search parameters
+    query = request.args.get('query', '')
+    user_name = request.args.get('user_name', '')
+    channel_name = request.args.get('channel_name', '')
+    start_time = request.args.get('start_time', '')
+    end_time = request.args.get('end_time', '')
+
+    conn = get_db_connection()
+    
+    # Build the SQL query
+    sql = '''
+    SELECT DISTINCT messages.*, users.name as user_name, channels.name as channel_name
+    FROM messages
+    JOIN users ON messages.user = users.id
+    JOIN channels ON messages.channel = channels.id
+    LEFT JOIN members ON messages.channel = members.channel
+    WHERE user NOT IN (SELECT user FROM optout)
+    '''
+    params = []
+
+    # Add conditions based on provided parameters
+    if query:
+        sql += ' AND messages.message LIKE ?'
+        params.append('%' + query + '%')
+
+    if user_name:
+        sql += ' AND users.name LIKE ?'
+        params.append('%' + user_name + '%')
+    
+    if channel_name:
+        sql += ' AND channels.name LIKE ?'
+        params.append('%' + channel_name + '%')
+    
+    if start_time:
+        sql += ' AND messages.timestamp >= ?'
+        params.append(start_time)
+    
+    if end_time:
+        sql += ' AND messages.timestamp <= ?'
+        params.append(end_time)
+
+    sql += ' ORDER BY messages.timestamp DESC'
+
+    messages = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    return get_response([dict(ix) for ix in messages])
+
 if __name__ == '__main__':
     flask_app.run(debug=True)
