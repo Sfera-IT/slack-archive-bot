@@ -336,12 +336,14 @@ def search_messages_V2():
         params.append('%' + channel_name + '%')
     
     if start_time:
-        sql += ' AND messages.timestamp >= ?'
-        params.append(start_time)
+        start_timestamp = datetime.fromisoformat(start_time.replace('Z', '+00:00')).timestamp()
+        sql += ' AND CAST(messages.timestamp AS FLOAT) >= ?'
+        params.append(start_timestamp)
     
     if end_time:
-        sql += ' AND messages.timestamp <= ?'
-        params.append(end_time)
+        end_timestamp = datetime.fromisoformat(end_time.replace('Z', '+00:00')).timestamp()
+        sql += ' AND CAST(messages.timestamp AS FLOAT) <= ?'
+        params.append(end_timestamp)
 
     sql += ' ORDER BY messages.timestamp DESC'
 
