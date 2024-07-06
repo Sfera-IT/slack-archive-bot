@@ -318,7 +318,7 @@ def search_messages_V2():
     JOIN users ON messages.user = users.id
     JOIN channels ON messages.channel = channels.id
     LEFT JOIN members ON messages.channel = members.channel
-    WHERE user NOT IN (SELECT user FROM optout)
+    WHERE 1=1
     '''
     params = []
 
