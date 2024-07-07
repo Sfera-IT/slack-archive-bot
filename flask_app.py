@@ -234,6 +234,20 @@ def get_channels():
     conn.close()
     return get_response([dict(ix) for ix in channels])
 
+@flask_app.route('/users', methods=['GET'])
+def get_users():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)['user_id']
+    if not headers or not user:
+        return redirect(url_for('login'))
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
+    
+    conn = get_db_connection()
+    users = conn.execute('SELECT * FROM users').fetchall()
+    conn.close()
+    return get_response([dict(ix) for ix in users])
+
 def check_optout(user):
     conn = get_db_connection()
     status = conn.execute('SELECT * FROM optout WHERE user = ?', (user,)).fetchone()
