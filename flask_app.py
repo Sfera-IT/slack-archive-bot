@@ -291,9 +291,7 @@ def get_messages(channel_id):
     
     # Convert row objects to dictionaries
     messages = [dict(msg) for msg in messages]
-    
-    return get_response({'messages': messages})
-    
+        
     return get_response([dict(ix) for ix in messages])
 
 @flask_app.route('/thread/<message_id>', methods=['GET'])
