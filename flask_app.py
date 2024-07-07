@@ -43,7 +43,8 @@ def get_response(data):
 
 def get_db_connection():
     cur_dir = os.path.dirname(__file__)
-    conn = sqlite3.connect('/data/slack.sqlite')
+    db_path = os.getenv('DB_PATH', '/data/slack.sqlite')
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -78,7 +79,7 @@ def oauth_callback():
 
     # create a jwt token with expiration
     exp_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=86400)
-    jwt_token = jwt.encode({'user_id': response_data['authed_user']['id'], 'exp': exp_time}, flask_app.secret_key, algorithm='HS256')
+    jwt_token = jwt.encode({'user_id': response_data['authed_user']['id'], 'exp': exp_time, 'slack_token': response_data['access_token']}, flask_app.secret_key, algorithm='HS256')
     
     return redirect(CLIENT_URL + "?token="+jwt_token)
 
@@ -103,6 +104,29 @@ def get_slack_headers():
     
 #     return True
 
+@flask_app.route('/emoji', methods=['GET'])
+def get_emoji():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)['user_id']
+    slack_token = verify_token_and_get_user(headers)['slack_token']
+
+    # if not headers or not user:
+    #     return redirect(url_for('login'))
+    
+    # if check_optout(user):
+    #     return get_response({'error': 'User opted out of archiving'})
+    
+    response = requests.get('https://slack.com/api/emoji.list', headers=headers)
+    print(response)
+    print(response.json())
+    data = response.json()
+
+    if not data.get('ok'):
+        return False
+    
+    return get_response(data)
+
+
 def verify_token_and_get_user(headers):
     token = headers['Authorization']
     # remove Bearer
@@ -118,12 +142,12 @@ def verify_token_and_get_user(headers):
         if not user:
             return False
         else:
-            return decoded['user_id']
+            return {'user_id': decoded['user_id'], 'slack_token': decoded['slack_token']}
     except jwt.ExpiredSignatureError:
         return False
     except jwt.InvalidTokenError:
         return False
-    return True
+    return False
 
 def get_username(user):
     conn = get_db_connection()
@@ -138,7 +162,7 @@ def get_channels_options():
 @flask_app.route('/whoami', methods=['GET'])
 def whoami():
     headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)
+    user = verify_token_and_get_user(headers)['user_id']
     username = get_username(user)
     conn = get_db_connection()
     status = conn.execute('SELECT * FROM optout WHERE user = ?', (user,)).fetchone()
@@ -160,7 +184,7 @@ def notify_users(users, text):
 @flask_app.route('/optout', methods=['GET'])
 def optout():
     headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)
+    user = verify_token_and_get_user(headers)['user_id']
     if not headers or not user:
         return redirect(url_for('login'))
 
@@ -202,7 +226,7 @@ def optout():
 @flask_app.route('/channels', methods=['GET'])
 def get_channels():
     headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)
+    user = verify_token_and_get_user(headers)['user_id']
     if not headers or not user:
         return redirect(url_for('login'))
     conn = get_db_connection()
@@ -221,7 +245,7 @@ def check_optout(user):
 @flask_app.route('/messages/<channel_id>', methods=['GET'])
 def get_messages(channel_id):
     headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)
+    user = verify_token_and_get_user(headers)['user_id']
     if not headers or not user:
         return redirect(url_for('login'))
     
@@ -248,7 +272,7 @@ def get_messages(channel_id):
 @flask_app.route('/thread/<message_id>', methods=['GET'])
 def get_thread(message_id):
     headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)
+    user = verify_token_and_get_user(headers)['user_id']
     if not headers or not user:
         return redirect(url_for('login'))
     
@@ -270,7 +294,7 @@ def get_thread(message_id):
 @flask_app.route('/search', methods=['GET'])
 def search_messages():
     headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)
+    user = verify_token_and_get_user(headers)['user_id']
     if not headers or not user:
         return redirect(url_for('login'))
     
@@ -296,7 +320,7 @@ def search_messages():
 @flask_app.route('/searchV2', methods=['GET'])
 def search_messages_V2():
     headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)
+    user = verify_token_and_get_user(headers)['user_id']
     if not headers or not user:
         return redirect(url_for('login'))
     if check_optout(user):
