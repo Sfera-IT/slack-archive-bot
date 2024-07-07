@@ -262,24 +262,37 @@ def get_messages(channel_id):
     user = verify_token_and_get_user(headers)['user_id']
     if not headers or not user:
         return redirect(url_for('login'))
-    
     if check_optout(user):
         return get_response({'error': 'User opted out of archiving'})
-
+    
     conn = get_db_connection()
     offset = request.args.get('offset', 0)
     limit = request.args.get('limit', 20)
+    
     messages = conn.execute('''
-        SELECT messages.*, users.name as user_name 
-        FROM messages 
-        JOIN users ON messages.user = users.id 
-        WHERE channel = ? 
-        AND (thread_ts IS NULL OR thread_ts = timestamp)
-        AND user NOT IN (SELECT user FROM optout)
-        ORDER BY timestamp DESC 
-        LIMIT ? OFFSET ?''', 
-        (channel_id, limit, offset)).fetchall()
+        SELECT 
+            m.*, 
+            u.name as user_name,
+            (SELECT COUNT(*) 
+             FROM messages thread 
+             WHERE thread.thread_ts = m.timestamp 
+               AND thread.channel = m.channel
+               AND thread.user NOT IN (SELECT user FROM optout)) as thread_count
+        FROM messages m
+        JOIN users u ON m.user = u.id
+        WHERE m.channel = ?
+          AND (m.thread_ts IS NULL OR m.thread_ts = m.timestamp)
+          AND m.user NOT IN (SELECT user FROM optout)
+        ORDER BY m.timestamp DESC
+        LIMIT ? OFFSET ?
+    ''', (channel_id, limit, offset)).fetchall()
+    
     conn.close()
+    
+    # Convert row objects to dictionaries
+    messages = [dict(msg) for msg in messages]
+    
+    return get_response({'messages': messages})
     
     return get_response([dict(ix) for ix in messages])
 
