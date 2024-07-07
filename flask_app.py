@@ -53,7 +53,7 @@ def login():
     slack_auth_url = (
         f"https://slack.com/oauth/v2/authorize?client_id={CLIENT_ID}"
         f"&scope={OAUTH_SCOPE}&user_scope=identity.basic"
-        f"&redirect_uri={url_for('oauth_callback', _external=True, _scheme='https')}"
+        f"&redirect_uri=https://slack-archive.sferait.org/oauth_callback"
     )
     return redirect(slack_auth_url)
 
@@ -116,7 +116,7 @@ def get_emoji():
     # if check_optout(user):
     #     return get_response({'error': 'User opted out of archiving'})
     
-    response = requests.get('https://slack.com/api/emoji.list', headers=headers)
+    response = requests.get('https://slack.com/api/emoji.list', headers={'Authorization': 'Bearer ' + slack_token})
     print(response)
     print(response.json())
     data = response.json()
