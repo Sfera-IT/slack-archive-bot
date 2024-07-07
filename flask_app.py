@@ -110,11 +110,11 @@ def get_emoji():
     user = verify_token_and_get_user(headers)['user_id']
     slack_token = verify_token_and_get_user(headers)['slack_token']
 
-    # if not headers or not user:
-    #     return redirect(url_for('login'))
+    if not headers or not user:
+        return redirect(url_for('login'))
     
-    # if check_optout(user):
-    #     return get_response({'error': 'User opted out of archiving'})
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
     
     response = requests.get('https://slack.com/api/emoji.list', headers={'Authorization': 'Bearer ' + slack_token})
     print(response)
