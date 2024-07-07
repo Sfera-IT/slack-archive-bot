@@ -1,3 +1,8 @@
 export
 **.sqlite
 **.pyc
+/README_LOCAL_TESTING.md
+/.vscode
+/.venv
+/.idea
+/.DS_Store
