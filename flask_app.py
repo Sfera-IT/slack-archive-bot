@@ -378,7 +378,7 @@ def search_messages_V2():
         if query.startswith('"') and query.endswith('"'):
             query = query[1:-1]
             sql += ' AND messages.message LIKE ?'
-            params.append(query)
+            params.append('%' + query + '%')
         else:
             for term in query.split():
                 sql += ' AND messages.message LIKE ?'
