@@ -371,10 +371,20 @@ def search_messages_V2():
     '''
     params = []
 
-    # Add conditions based on provided parameters
+    # query:
+    # if the query is surrounded by quotes, search for the exact phrase
+    # otherwise, search for each term separately
     if query:
-        sql += ' AND messages.message LIKE ?'
-        params.append('%' + query + '%')
+        if query.startswith('"') and query.endswith('"'):
+            query = query[1:-1]
+            sql += ' AND messages.message LIKE ?'
+            params.append(query)
+        else:
+            sql += 'AND (1=0'
+            for term in query.split():
+                sql += ' OR messages.message LIKE ?'
+                params.append('%' + term + '%')
+            sql += ')'
 
     if user_name:
         sql += ' AND users.name LIKE ?'
