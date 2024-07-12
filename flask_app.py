@@ -380,11 +380,9 @@ def search_messages_V2():
             sql += ' AND messages.message LIKE ?'
             params.append(query)
         else:
-            sql += 'AND (1=0'
             for term in query.split():
-                sql += ' OR messages.message LIKE ?'
+                sql += ' AND messages.message LIKE ?'
                 params.append('%' + term + '%')
-            sql += ')'
 
     if user_name:
         sql += ' AND users.name LIKE ?'
