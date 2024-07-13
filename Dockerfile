@@ -1,13 +1,24 @@
-FROM python:3.9
+# Fase 1: Costruzione
+FROM python:3.9 AS build
 
 WORKDIR /usr/src/app
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y gcc musl-dev libffi-dev
 
-COPY . /usr/src/app
-
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Fase 2: Esecuzione
+FROM python:3.9-slim AS final
+
+WORKDIR /usr/src/app
+
+COPY --from=build /usr/src/app /usr/src/app
+COPY --from=build /usr/local/lib/python3.9/site-packages /usr/local/lib/python3.9/site-packages
+COPY --from=build /usr/local/bin/gunicorn /usr/local/bin/gunicorn
 
 VOLUME /data
 ENV DB_NAME=slack.sqlite
