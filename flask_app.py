@@ -8,6 +8,8 @@ from slack_bolt.adapter.flask import SlackRequestHandler
 from archivebot import app
 handler = SlackRequestHandler(app)
 import datetime
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 
 load_dotenv()
@@ -408,6 +410,80 @@ def search_messages_V2():
     conn.close()
 
     return get_response([dict(ix) for ix in messages])
+
+
+@flask_app.route('/searchEmbeddings', methods=['GET'])
+def search_messages_embeddings():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)['user_id']
+    if not headers or not user:
+        return redirect(url_for('login'))
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
+
+    # Get search parameters
+    query = request.args.get('query', '')
+    user_name = request.args.get('user_name', '')
+    channel_name = request.args.get('channel_name', '')
+    start_time = request.args.get('start_time', '')
+    end_time = request.args.get('end_time', '')
+
+    conn = get_db_connection()
+    
+    # Build the SQL query
+    sql = '''
+    SELECT DISTINCT messages.*, users.name as user_name, channels.name as channel_name
+    FROM messages
+    JOIN users ON messages.user = users.id
+    JOIN channels ON messages.channel = channels.id
+    LEFT JOIN members ON messages.channel = members.channel
+    WHERE 1=1
+    '''
+    params = []
+
+    if user_name:
+        sql += ' AND users.name LIKE ?'
+        params.append('%' + user_name + '%')
+    
+    if channel_name:
+        sql += ' AND channels.name LIKE ?'
+        params.append('%' + channel_name + '%')
+    
+    if start_time:
+        start_timestamp = datetime.datetime.fromisoformat(start_time.replace('Z', '+00:00')).timestamp()
+        sql += ' AND CAST(messages.timestamp AS FLOAT) >= ?'
+        params.append(start_timestamp)
+    
+    if end_time:
+        end_timestamp = datetime.datetime.fromisoformat(end_time.replace('Z', '+00:00')).timestamp()
+        sql += ' AND CAST(messages.timestamp AS FLOAT) <= ?'
+        params.append(end_timestamp)
+
+    sql += ' ORDER BY messages.timestamp DESC LIMIT 20'
+
+    messages = conn.execute(sql, params).fetchall()
+
+    # Inizializza il modello SentenceTransformer
+    model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
+
+    # Genera l'embedding per la frase di query
+    query_embedding = model.encode(query)
+
+    # recupero solo le colonne id, message ed embedding dall'array messages
+    rows = [(row['id'], row['message'], row['embedding']) for row in messages]
+
+    # Calcola la distanza coseno tra l'embedding di query e tutti gli embeddings nel database
+    distances = []
+    for row in rows:
+        id, sentence, embedding_blob = row
+        embedding = np.frombuffer(embedding_blob, dtype=np.float32)
+        distance = np.dot(query_embedding, embedding) / (np.linalg.norm(query_embedding) * np.linalg.norm(embedding))
+        distances.append((id, sentence, distance))
+
+    # Ordina i risultati per distanza (distanza minore = maggiore similarità)
+    distances.sort(key=lambda x: x[2], reverse=True)
+
+    return get_response([dict(ix) for ix in distances])
 
 if __name__ == '__main__':
     flask_app.run(debug=True)

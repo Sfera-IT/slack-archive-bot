@@ -3,6 +3,8 @@ import logging
 import os
 import traceback
 import shlex
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 
 from slack_bolt import App
@@ -72,6 +74,13 @@ def update_users(conn, cursor):
     cursor.executemany("INSERT INTO users(name, id, avatar) VALUES(?,?,?)", args)
     conn.commit()
 
+def create_embeddings(message):
+    try:
+        model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
+        embeddings = model.encode(message)
+    except:
+        embeddings = ""
+    return embeddings
 
 def get_channel_info(channel_id):
     channel = app.client.conversations_info(channel=channel_id)["channel"]
@@ -516,7 +525,7 @@ def handle_message(message, say):
 
         logger.debug(permalink["permalink"])
         cursor.execute(
-            "INSERT INTO messages VALUES(?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages VALUES(?, ?, ?, ?, ?, ?, ?)",
             (
                 message["text"],
                 message["user"],
@@ -524,6 +533,7 @@ def handle_message(message, say):
                 message["ts"],
                 permalink["permalink"],
                 message["thread_ts"] if "thread_ts" in message else None,
+                create_embeddings(message["text"])
             ),
         )
         conn.commit()
