@@ -523,11 +523,11 @@ def search_messages_embeddings():
         distances.append(row)
 
     # Ordina i risultati per distanza (distanza minore = maggiore similarità)
-    distances.sort(key=lambda x: x[2], reverse=True)
+    distances.sort(key=lambda x: x['distance'], reverse=True)
 
     # itero su distances e converto la colonna distance in stringa
     for d in distances:
-        d[2] = str(d[2])
+        d['distance'] = str(d['distance'])
 
     return get_response(distances)
 
