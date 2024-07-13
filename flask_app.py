@@ -504,6 +504,9 @@ def search_messages_embeddings():
     # Genera l'embedding per la frase di query
     query_embedding = model.encode(query)
 
+    # copy messages into an array of dictionaries
+    messages = [dict(ix) for ix in messages]
+
     # Calcola la distanza coseno tra l'embedding di query e tutti gli embeddings nel database
     distances = []
     for row in messages:
