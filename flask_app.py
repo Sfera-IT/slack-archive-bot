@@ -494,7 +494,7 @@ def search_messages_embeddings():
         sql += ' AND CAST(messages.timestamp AS FLOAT) <= ?'
         params.append(end_timestamp)
 
-    sql += ' ORDER BY messages.timestamp DESC LIMIT 20'
+    sql += ' ORDER BY messages.timestamp DESC'
 
     messages = conn.execute(sql, params).fetchall()
 
