@@ -273,7 +273,12 @@ def get_messages(channel_id):
     
     messages = conn.execute('''
         SELECT 
-            m.*, 
+            m.message,
+            m.user,
+            m.channel,
+            m.timestamp,
+            m.permalink,
+            m.thread_ts, 
             u.name as user_name,
             (SELECT COUNT(*) 
              FROM messages thread 
@@ -308,7 +313,14 @@ def get_thread(message_id):
 
     conn = get_db_connection()
     thread = conn.execute('''
-        SELECT messages.*, users.name as user_name 
+        SELECT
+        messages.message,
+        messages.user,
+        messages.channel,
+        messages.timestamp,
+        messages.permalink,
+        messages.thread_ts, 
+        users.name as user_name 
         FROM messages 
         JOIN users ON messages.user = users.id 
         WHERE ( messages.timestamp = ? OR messages.thread_ts = ? )
@@ -331,7 +343,14 @@ def search_messages():
     query = request.args.get('query', '')
     conn = get_db_connection()
     messages = conn.execute('''
-        SELECT messages.*, users.name as user_name 
+        SELECT
+        messages.message,
+        messages.user,
+        messages.channel,
+        messages.timestamp,
+        messages.permalink,
+        messages.thread_ts, 
+        users.name as user_name 
         FROM messages 
         JOIN users ON messages.user = users.id 
         WHERE (message LIKE ? OR users.name LIKE ?)
@@ -364,7 +383,15 @@ def search_messages_V2():
     
     # Build the SQL query
     sql = '''
-    SELECT DISTINCT messages.*, users.name as user_name, channels.name as channel_name
+    SELECT DISTINCT
+    messages.message,
+    messages.user,
+    messages.channel,
+    messages.timestamp,
+    messages.permalink,
+    messages.thread_ts,  
+    
+    users.name as user_name, channels.name as channel_name
     FROM messages
     JOIN users ON messages.user = users.id
     JOIN channels ON messages.channel = channels.id
@@ -432,7 +459,14 @@ def search_messages_embeddings():
     
     # Build the SQL query
     sql = '''
-    SELECT DISTINCT messages.*, users.name as user_name, channels.name as channel_name
+    SELECT DISTINCT 
+    messages.message,
+    messages.user,
+    messages.channel,
+    messages.timestamp,
+    messages.permalink,
+    messages.thread_ts, 
+    users.name as user_name, channels.name as channel_name
     FROM messages
     JOIN users ON messages.user = users.id
     JOIN channels ON messages.channel = channels.id
