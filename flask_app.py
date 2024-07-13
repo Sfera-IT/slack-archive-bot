@@ -465,13 +465,14 @@ def search_messages_embeddings():
     messages.channel,
     messages.timestamp,
     messages.permalink,
-    messages.thread_ts, 
+    messages.thread_ts,
+    messages.embeddings,
     users.name as user_name, channels.name as channel_name
     FROM messages
     JOIN users ON messages.user = users.id
     JOIN channels ON messages.channel = channels.id
     LEFT JOIN members ON messages.channel = members.channel
-    WHERE 1=1
+    WHERE messages.embeddings IS NOT NULL
     '''
     params = []
 
@@ -502,9 +503,8 @@ def search_messages_embeddings():
 
     # Genera l'embedding per la frase di query
     query_embedding = model.encode(query)
-
     # recupero solo le colonne id, message ed embedding dall'array messages
-    rows = [(row['id'], row['message'], row['embedding']) for row in messages]
+    rows = [(row['timestamp'], row['message'], row['embeddings']) for row in messages]
 
     # Calcola la distanza coseno tra l'embedding di query e tutti gli embeddings nel database
     distances = []
@@ -517,7 +517,10 @@ def search_messages_embeddings():
     # Ordina i risultati per distanza (distanza minore = maggiore similarità)
     distances.sort(key=lambda x: x[2], reverse=True)
 
-    return get_response([dict(ix) for ix in distances])
+    # Creare una lista di dizionari con chiavi appropriate
+    results = [{'timestamp': d[0], 'message': d[1], 'distance': d[2]} for d in distances]
+
+    return get_response(results)
 
 if __name__ == '__main__':
     flask_app.run(debug=True)
