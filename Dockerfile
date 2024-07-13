@@ -4,10 +4,11 @@ FROM python:3.9 AS build
 WORKDIR /usr/src/app
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y gcc musl-dev libffi-dev
+RUN apt-get update && apt-get install -y gcc musl-dev libffi-dev && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# remove cuda stuff for size optimization
+RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 COPY . .
 
