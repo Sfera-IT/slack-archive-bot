@@ -86,6 +86,18 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Add `embeddings` to messages
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE messages
+            ADD COLUMN embeddings BLOB default NULL
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
 
 def db_connect(database_path):
     conn = sqlite3.connect(database_path)
