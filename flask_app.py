@@ -503,24 +503,30 @@ def search_messages_embeddings():
 
     # Genera l'embedding per la frase di query
     query_embedding = model.encode(query)
-    # recupero solo le colonne id, message ed embedding dall'array messages
-    rows = [(row['timestamp'], row['message'], row['embeddings']) for row in messages]
 
     # Calcola la distanza coseno tra l'embedding di query e tutti gli embeddings nel database
     distances = []
-    for row in rows:
-        id, sentence, embedding_blob = row
+    for row in messages:
+        id = row['timestamp']
+        sentence = row['message']
+        embedding_blob = row['embeddings']
+
         embedding = np.frombuffer(embedding_blob, dtype=np.float32)
         distance = np.dot(query_embedding, embedding) / (np.linalg.norm(query_embedding) * np.linalg.norm(embedding))
-        distances.append((id, sentence, distance))
+
+        row['distance'] = distance
+        row.pop('embeddings')
+
+        distances.append(row)
 
     # Ordina i risultati per distanza (distanza minore = maggiore similarità)
     distances.sort(key=lambda x: x[2], reverse=True)
 
-    # Creare una lista di dizionari con chiavi appropriate
-    results = [{'timestamp': d[0], 'message': d[1], 'distance': d[2]} for d in distances]
+    # itero su distances e converto la colonna distance in stringa
+    for d in distances:
+        d[2] = str(d[2])
 
-    return get_response(results)
+    return get_response(distances)
 
 if __name__ == '__main__':
     flask_app.run(debug=True)
