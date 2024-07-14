@@ -557,6 +557,7 @@ def handle_message_with_file(event, say):
         "user": event["user"],
         "channel": event["channel"],
         "ts": event["ts"],
+        "thread_ts": event.get("thread_ts"),
         "channel_type": event["channel_type"]
     }
 
