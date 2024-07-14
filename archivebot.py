@@ -546,6 +546,22 @@ def handle_message(message, say):
 
     logger.debug("--------------------------")
 
+@app.event({"type": "message", "subtype": "file_share"})
+def handle_message_with_file(event, say):
+    logger = logging.getLogger(__name__)
+    logger.debug(event)
+
+    # Extract the text and other necessary information from the event
+    message = {
+        "text": event.get("text", "") + " - Il messaggio conteneva un media ma non è stato possibile salvarlo.",
+        "user": event["user"],
+        "channel": event["channel"],
+        "ts": event["ts"],
+        "channel_type": event["channel_type"]
+    }
+
+    # Call handle_message with the extracted information
+    handle_message(message, say)
 
 @app.message("")
 def handle_message_default(message, say):
