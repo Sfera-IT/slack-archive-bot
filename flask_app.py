@@ -555,13 +555,13 @@ def generate_digest():
     LIMIT 1
     ''').fetchone()
 
-    # if existing_digest:
-    #     conn.close()
-    #     return get_response({
-    #         'status': 'success', 
-    #         'digest': existing_digest['digest'],
-    #         'period': existing_digest['period']
-    #     })
+    if existing_digest:
+        conn.close()
+        return get_response({
+            'status': 'success', 
+            'digest': existing_digest['digest'],
+            'period': existing_digest['period']
+        })
 
     # If no existing digest, continue with the original logic to generate a new one
     messages = conn.execute('''
