@@ -643,13 +643,75 @@ def generate_digest():
 
     # Insert the digest into the database
     conn.execute('''
-    INSERT INTO digests (timestamp, period, digest)
-    VALUES (?, ?, ?)
-    ''', (datetime.datetime.utcnow().isoformat(), period, summary))
+    INSERT INTO digests (timestamp, period, digest, posts)
+    VALUES (?, ?, ?, ?)
+    ''', (datetime.datetime.utcnow().isoformat(), period, summary, formatted_messages))
     conn.commit()
     conn.close()
 
     return get_response({'status': 'success', 'digest': summary, 'period': period})
+
+
+@flask_app.route('/digest_details', methods=['POST'])
+def digest_details():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)['user_id']
+    if not headers or not user:
+        return redirect(url_for('login'))
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
+
+    # Get the query from the POST request
+    data = request.get_json()
+    query = data.get('query')
+    if not query:
+        return get_response({'error': 'No query provided'})
+
+    conn = get_db_connection()
+    
+    # Get the latest digest
+    latest_digest = conn.execute('''
+    SELECT digest, posts FROM digests
+    ORDER BY timestamp DESC
+    LIMIT 1
+    ''').fetchone()
+
+    if not latest_digest:
+        conn.close()
+        return get_response({'error': 'No digest available'})
+
+    digest = latest_digest['digest']
+    posts = latest_digest['posts']
+
+    conn.close()
+
+    # Generate details using OpenAI
+    openai.api_key = os.getenv('OPENAI_API_KEY')
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Sei un assistente che fornisce dettagli sulle conversazioni di un workspace Slack in base a specifiche richieste."},
+            {"role": "user", "content": f"""Dato il seguente riassunto di un digest Slack e i post originali, fornisci dettagli specifici in risposta alla query dell'utente. 
+            Usa i post originali per fornire informazioni precise e dettagliate.
+
+            Riassunto del digest:
+            {digest}
+
+            Post originali:
+            {posts}
+
+            Query dell'utente: {query}
+
+            Fornisci una risposta dettagliata, in italiano e in formato markdown."""}
+        ],
+        max_tokens=4096,
+        request_timeout=300
+    )
+    
+    details = response.choices[0].message.content
+
+    return get_response({'status': 'success', 'details': details})
+
 
 if __name__ == '__main__':
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'

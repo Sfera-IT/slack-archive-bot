@@ -113,6 +113,18 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # add posts to digests
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE digests
+            ADD COLUMN posts TEXT
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
 def db_connect(database_path):
     conn = sqlite3.connect(database_path)
     cursor = conn.cursor()
