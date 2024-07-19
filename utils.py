@@ -125,6 +125,22 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # opt ou from ai table
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS optout_ai (
+                user TEXT,
+                timestamp TEXT,
+                FOREIGN KEY (user) REFERENCES users(id)
+                UNIQUE(user, timestamp) ON CONFLICT REPLACE
+            )
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
 def db_connect(database_path):
     conn = sqlite3.connect(database_path)
     cursor = conn.cursor()

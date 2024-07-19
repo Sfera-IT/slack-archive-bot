@@ -170,12 +170,18 @@ def whoami():
     username = get_username(user)
     conn = get_db_connection()
     status = conn.execute('SELECT * FROM optout WHERE user = ?', (user,)).fetchone()
+    opted_out_ai = conn.execute('SELECT * FROM optout_ai WHERE user = ?', (user,)).fetchone()
+    if opted_out_ai:
+        opted_out_ai = True
+    else:
+        opted_out_ai = False
+
     conn.close()
     if not headers or not user:
         return redirect(url_for('login'))
     if status:
-        return get_response({'user_id': user, 'username': username, 'opted_out': True})
-    return get_response({'user_id': user, 'username': username, 'opted_out': False})
+        return get_response({'user_id': user, 'username': username, 'opted_out': True, 'opted_out_ai': opted_out_ai})
+    return get_response({'user_id': user, 'username': username, 'opted_out': False, 'opted_out_ai': opted_out_ai})
 
 
 def notify_users(users, text):
@@ -583,10 +589,11 @@ def generate_digest():
         (datetime(timestamp, 'unixepoch') >= datetime('now', '-1 day') AND datetime(thread_ts, 'unixepoch') < datetime('now', '-1 day')))
         AND
         user != 'USLACKBOT'
+        AND 
+        user NOT IN (SELECT user FROM optout_ai)
     ORDER BY channel_name ASC, thread_ts ASC, timestamp ASC;
     ''').fetchall()
 
-    # Format the messages for the OpenAI prompt, including all the columns
     # Format the messages for the OpenAI prompt, including all the columns
     formatted_messages = ""
     current_channel = None
@@ -711,6 +718,33 @@ def digest_details():
     details = response.choices[0].message.content
 
     return get_response({'status': 'success', 'details': details})
+
+@flask_app.route('/optout_ai', methods=['GET'])
+def optout():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)['user_id']
+    if not headers or not user:
+        return redirect(url_for('login'))
+
+    conn = get_db_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO optout_ai (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
+        conn.commit()
+
+    except Exception as e:
+        # return the exception as an error
+        if conn:
+            conn.rollback()
+        return get_response({'error': str(e)})
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+    return get_response({'user_id': user, 'opted_out': True})
 
 
 if __name__ == '__main__':
