@@ -21,3 +21,5 @@ watchdog==4.0.1
 torch==2.3.1
 sentence-transformers==3.0.1
 numpy==1.26.4
+openai==0.27.2
+timedelta==2020.12.3

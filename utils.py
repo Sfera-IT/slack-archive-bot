@@ -98,6 +98,20 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # digests table
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS digests (
+                timestamp TEXT NOT NULL,
+                period TEXT NOT NULL,
+                digest TEXT NOT NULL
+            )
+        """
+        )
+        conn.commit()
+    except:
+        pass
 
 def db_connect(database_path):
     conn = sqlite3.connect(database_path)

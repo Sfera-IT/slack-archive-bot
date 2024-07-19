@@ -597,6 +597,7 @@ def init():
     # Initialize the DB if it doesn't exist
     conn, cursor = db_connect(database_path)
     migrate_db(conn, cursor)
+    logger.info("Database migrated")
 
     # Update the users and channels in the DB and in the local memory mapping
     try:

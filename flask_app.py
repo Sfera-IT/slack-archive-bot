@@ -10,6 +10,8 @@ handler = SlackRequestHandler(app)
 import datetime
 from sentence_transformers import SentenceTransformer
 import numpy as np
+import openai
+from datetime import timedelta
 
 
 load_dotenv()
@@ -534,5 +536,120 @@ def search_messages_embeddings():
 
     return get_response(distances)
 
+@flask_app.route('/generate_digest', methods=['POST'])
+def generate_digest():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)['user_id']
+    if not headers or not user:
+        return redirect(url_for('login'))
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
+
+    conn = get_db_connection()
+
+    # before executing the query, check if a digest already exist in the last 24 hours. If yes, return the saved digest
+    existing_digest = conn.execute('''
+    SELECT digest, period FROM digests
+    WHERE timestamp >= datetime('now', '-1 day')
+    ORDER BY timestamp DESC
+    LIMIT 1
+    ''').fetchone()
+
+    # if existing_digest:
+    #     conn.close()
+    #     return get_response({
+    #         'status': 'success', 
+    #         'digest': existing_digest['digest'],
+    #         'period': existing_digest['period']
+    #     })
+
+    # If no existing digest, continue with the original logic to generate a new one
+    messages = conn.execute('''
+    SELECT 
+        message,
+        users.name as username,
+        channels.name as channel_name,
+        timestamp,
+        CASE 
+            WHEN thread_ts IS NULL THEN timestamp 
+            ELSE thread_ts 
+        END AS thread_ts
+    FROM messages
+    INNER JOIN users on users.id = messages.user
+    INNER JOIN channels on channels.id = messages.channel
+    WHERE 
+        (datetime(thread_ts, 'unixepoch') >= datetime('now', '-1 day') 
+        OR
+        (datetime(timestamp, 'unixepoch') >= datetime('now', '-1 day') AND datetime(thread_ts, 'unixepoch') < datetime('now', '-1 day')))
+        AND
+        user != 'USLACKBOT'
+    ORDER BY channel_name ASC, thread_ts ASC, timestamp ASC;
+    ''').fetchall()
+
+    # Format the messages for the OpenAI prompt, including all the columns
+    # Format the messages for the OpenAI prompt, including all the columns
+    formatted_messages = ""
+    current_channel = None
+    current_thread = None
+
+    for message in messages:
+        # Start a new channel section if needed
+        if message['channel_name'] != current_channel:
+            current_channel = message['channel_name']
+            formatted_messages += f"\n\nChannel: {current_channel}\n"
+            current_thread = None
+
+        # Start a new thread section if needed
+        if message['thread_ts'] != current_thread:
+            current_thread = message['thread_ts']
+            formatted_messages += f"\nThread started at {datetime.datetime.fromtimestamp(float(current_thread)).strftime('%Y-%m-%d %H:%M:%S')}:\n"
+
+        # Format the message
+        timestamp = datetime.datetime.fromtimestamp(float(message['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
+        formatted_messages += f"[{timestamp}] {message['username']}: {message['message']}\n"
+
+    max_chars = 256000  # Approximate character limit (128000 tokens * 2 chars per token)
+    if len(formatted_messages) > max_chars:
+        formatted_messages = formatted_messages[:max_chars] + "...\n(truncated due to length)"
+    
+    
+    # Generate summary using OpenAI
+    openai.api_key = os.getenv('OPENAI_API_KEY')
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 2000 parole, e sempre in italiano."},
+            {"role": "user", "content": f"""In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
+                L'estrazione contiene tutti i messaggi inviati sul workspace, suddivisi in canali e thread. 
+                Sono inclusi anche i thread più vecchi di 24 ore se hanno ricevuto una risposta nelle ultime 24 ore. 
+                Il tuo compito è creare un digest discorsivo ma abbastanza dettagliato da fornire agli utenti. 
+                Racconta cosa è successo su ogni canale in maniera descrittiva, ma enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati, fornendo un buon numero di dettagli. 
+                La risposta deve essere in formato markdown.
+                PRIMA del riassunto, inserisci una sezione in cui fai un preambolo dicendo quali sono stati i canali più attivi, quali i thread più discussi, e quali sono stati gli argomenti più trattati.
+
+                {formatted_messages}"""}
+        ],
+       max_tokens=4096,
+       request_timeout=300
+    )
+    
+    summary = response.choices[0].message.content
+
+    # Calculate the period
+    end_date = datetime.datetime.utcnow()
+    start_date = end_date - timedelta(days=1)
+    period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+
+    # Insert the digest into the database
+    conn.execute('''
+    INSERT INTO digests (timestamp, period, digest)
+    VALUES (?, ?, ?)
+    ''', (datetime.datetime.utcnow().isoformat(), period, summary))
+    conn.commit()
+    conn.close()
+
+    return get_response({'status': 'success', 'digest': summary, 'period': period})
+
 if __name__ == '__main__':
-    flask_app.run(debug=True)
+    debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
+    flask_app.run(debug=debug_mode)
