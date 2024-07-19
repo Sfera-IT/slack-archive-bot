@@ -695,14 +695,11 @@ def digest_details():
     # Generate details using OpenAI
     openai.api_key = os.getenv('OPENAI_API_KEY')
     response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
+        model="gpt-4o", # gpt-4o non mini per essere più precisi
         messages=[
             {"role": "system", "content": "Sei un assistente che fornisce dettagli sulle conversazioni di un workspace Slack in base a specifiche richieste."},
-            {"role": "user", "content": f"""Dato il seguente riassunto di un digest Slack e i post originali, fornisci dettagli specifici in risposta alla query dell'utente. 
+            {"role": "user", "content": f"""Dati i seguenti post originali, fornisci dettagli specifici in risposta alla query dell'utente. 
             Usa i post originali per fornire informazioni precise e dettagliate.
-
-            Riassunto del digest:
-            {digest}
 
             Post originali:
             {posts}
