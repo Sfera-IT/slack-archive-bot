@@ -532,7 +532,7 @@ def handle_message(message, say):
                 message["channel"],
                 message["ts"],
                 permalink["permalink"],
-                message["thread_ts"] if "thread_ts" in message else None,
+                message["thread_ts"] if "thread_ts" in message else message["ts"],
                 create_embeddings(message["text"])
             ),
         )
