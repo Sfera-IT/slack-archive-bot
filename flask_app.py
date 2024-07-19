@@ -727,7 +727,15 @@ def optout_ai():
     cursor = None
     try:
         cursor = conn.cursor()
-        cursor.execute('INSERT INTO optout_ai (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
+
+        opted_out_ai = conn.execute('SELECT * FROM optout_ai WHERE user = ?', (user,)).fetchone()
+        if opted_out_ai:
+            cursor.execute('DELETE FROM optout_ai WHERE user = ?', (user,))
+            ret = False
+        else:
+            cursor.execute('INSERT INTO optout_ai (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)', (user,))
+            ret = True
+        
         conn.commit()
 
     except Exception as e:
@@ -741,7 +749,7 @@ def optout_ai():
         if conn:
             conn.close()
 
-    return get_response({'user_id': user, 'opted_out': True})
+    return get_response({'user_id': user, 'opted_out': ret})
 
 
 if __name__ == '__main__':
