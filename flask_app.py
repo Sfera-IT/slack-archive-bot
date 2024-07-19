@@ -623,7 +623,8 @@ def generate_digest():
                 L'estrazione contiene tutti i messaggi inviati sul workspace, suddivisi in canali e thread. 
                 Sono inclusi anche i thread più vecchi di 24 ore se hanno ricevuto una risposta nelle ultime 24 ore. 
                 Il tuo compito è creare un digest discorsivo ma abbastanza dettagliato da fornire agli utenti. 
-                Racconta cosa è successo su ogni canale in maniera descrittiva, ma enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati, fornendo un buon numero di dettagli. 
+                Racconta cosa è successo su ogni canale in maniera descrittiva, ma enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati, fornendo un buon numero di dettagli, 
+                inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. 
                 La risposta deve essere in formato markdown.
                 PRIMA del riassunto, inserisci una sezione in cui fai un preambolo dicendo quali sono stati i canali più attivi, quali i thread più discussi, e quali sono stati gli argomenti più trattati.
 
