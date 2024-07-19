@@ -720,7 +720,7 @@ def digest_details():
     return get_response({'status': 'success', 'details': details})
 
 @flask_app.route('/optout_ai', methods=['GET'])
-def optout():
+def optout_ai():
     headers = get_slack_headers()
     user = verify_token_and_get_user(headers)['user_id']
     if not headers or not user:
