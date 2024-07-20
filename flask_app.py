@@ -554,6 +554,8 @@ def generate_digest():
     conn = get_db_connection()
 
     # before executing the query, check if a digest already exist in the last 24 hours. If yes, return the saved digest
+    # unless there is a parameter "force_generate"
+    
     existing_digest = conn.execute('''
     SELECT digest, period FROM digests
     WHERE timestamp >= datetime('now', '-1 day')
@@ -561,7 +563,7 @@ def generate_digest():
     LIMIT 1
     ''').fetchone()
 
-    if existing_digest:
+    if existing_digest and not request.args.get('force_generate'):
         conn.close()
         return get_response({
             'status': 'success', 
