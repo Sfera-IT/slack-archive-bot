@@ -146,7 +146,6 @@ def migrate_db(conn, cursor):
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS digest_details (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,
                 query TEXT NOT NULL,
                 details TEXT NOT NULL,
