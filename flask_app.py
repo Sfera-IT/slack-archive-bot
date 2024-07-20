@@ -563,7 +563,7 @@ def generate_digest():
     LIMIT 1
     ''').fetchone()
 
-    force_generate = request.json.get('force_generate')
+    force_generate = request.json.get('force_generate', False)
     if existing_digest and not force_generate:
         conn.close()
         return get_response({
@@ -693,8 +693,6 @@ def digest_details():
     digest = latest_digest['digest']
     posts = latest_digest['posts']
 
-    conn.close()
-
     # Generate details using OpenAI
     openai.api_key = os.getenv('OPENAI_API_KEY')
     response = openai.ChatCompletion.create(
@@ -716,6 +714,22 @@ def digest_details():
     )
     
     details = response.choices[0].message.content
+
+    # Salva i dettagli generati nel database
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO digest_details (user_id, query, details, timestamp)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (user['user_id'], query, details))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        pass
+    finally:
+        cursor.close()
+
+    conn.close()
 
     return get_response({'status': 'success', 'details': details})
 

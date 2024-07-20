@@ -125,7 +125,7 @@ def migrate_db(conn, cursor):
     except:
         pass
 
-    # opt ou from ai table
+    # opt out from ai table
     try:
         cursor.execute(
             """
@@ -139,6 +139,25 @@ def migrate_db(conn, cursor):
         )
         conn.commit()
     except:
+        pass
+
+    # digest_details
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS digest_details (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                query TEXT NOT NULL,
+                details TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"Error creating digest_details table: {e}")
         pass
 
 def db_connect(database_path):
