@@ -563,7 +563,8 @@ def generate_digest():
     LIMIT 1
     ''').fetchone()
 
-    if existing_digest and not request.args.get('force_generate'):
+    force_generate = request.json.get('force_generate')
+    if existing_digest and not force_generate:
         conn.close()
         return get_response({
             'status': 'success', 
