@@ -721,7 +721,7 @@ def digest_details():
         cursor.execute('''
         INSERT INTO digest_details (user_id, query, details, timestamp)
         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (user['user_id'], query, details))
+        ''', (user, query, details))
         conn.commit()
     except Exception as e:
         conn.rollback()
