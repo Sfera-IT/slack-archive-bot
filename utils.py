@@ -150,6 +150,7 @@ def migrate_db(conn, cursor):
                 query TEXT NOT NULL,
                 details TEXT NOT NULL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                digest_timestamp TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
             """

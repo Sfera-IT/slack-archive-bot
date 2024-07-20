@@ -681,7 +681,7 @@ def digest_details():
     
     # Get the latest digest
     latest_digest = conn.execute('''
-    SELECT digest, posts FROM digests
+    SELECT digest, posts, timestamp FROM digests
     ORDER BY timestamp DESC
     LIMIT 1
     ''').fetchone()
@@ -692,6 +692,7 @@ def digest_details():
 
     digest = latest_digest['digest']
     posts = latest_digest['posts']
+    digest_timestamp = latest_digest['timestamp']
 
     # Generate details using OpenAI
     openai.api_key = os.getenv('OPENAI_API_KEY')
@@ -719,9 +720,9 @@ def digest_details():
     try:
         cursor = conn.cursor()
         cursor.execute('''
-        INSERT INTO digest_details (user_id, query, details, timestamp)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (user, query, details))
+        INSERT INTO digest_details (user_id, query, details, timestamp, digest_timestamp)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
+        ''', (user, query, details, digest_timestamp))
         conn.commit()
     except Exception as e:
         conn.rollback()
