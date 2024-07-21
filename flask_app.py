@@ -571,9 +571,9 @@ def generate_digest():
             'digest': existing_digest['digest'],
             'period': existing_digest['period']
         })
-
+    
     # If no existing digest, continue with the original logic to generate a new one
-    messages = conn.execute('''
+    messages = conn.execute(f'''
     SELECT 
         message,
         users.name as username,
@@ -587,9 +587,12 @@ def generate_digest():
     INNER JOIN users on users.id = messages.user
     INNER JOIN channels on channels.id = messages.channel
     WHERE 
-        (datetime(thread_ts, 'unixepoch') >= datetime('now', '-1 day') 
-        OR
-        (datetime(timestamp, 'unixepoch') >= datetime('now', '-1 day') AND datetime(thread_ts, 'unixepoch') < datetime('now', '-1 day')))
+        thread_ts in (
+            SELECT DISTINCT thread_ts
+            FROM messages
+            WHERE datetime(timestamp, 'unixepoch') >= datetime('now', '-1 days')
+            AND thread_ts IS NOT NULL
+        )
         AND
         user != 'USLACKBOT'
         AND 
