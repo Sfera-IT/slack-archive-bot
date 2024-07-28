@@ -12,6 +12,7 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 import openai
 from datetime import timedelta
+import re
 
 
 load_dotenv()
@@ -667,7 +668,8 @@ def generate_digest():
     # If send_to_channel is set, send the digest to the channel
     if send_to_channel:
         try:
-            message = f"*Digest for {period}*\n\n{summary} \n\n Puoi trovare maggiori informazioni ed eseguire opt-out dalle funzioni AI qui: https://sferaarchive-client.vercel.app/"
+            slack_formatted_summary = convert_markdown_to_slack(summary)
+            message = f"*Digest for {period}*\n\n{slack_formatted_summary} \n\n Puoi trovare maggiori informazioni ed eseguire opt-out dalle funzioni AI qui: https://sferaarchive-client.vercel.app/"
             response = app.client.chat_postMessage(
                 channel='C011CK2HYP9',
                 text=message,
@@ -805,6 +807,26 @@ def get_link():
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
+
+def convert_markdown_to_slack(text):
+    # Convert headers
+    text = re.sub(r'^#\s(.+)$', r'*\1*', text, flags=re.MULTILINE)
+    text = re.sub(r'^##\s(.+)$', r'*\1*', text, flags=re.MULTILINE)
+    text = re.sub(r'^###\s(.+)$', r'*\1*', text, flags=re.MULTILINE)
+
+    # Convert bold
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+
+    # Convert italic
+    text = re.sub(r'_(.+?)_', r'_\1_', text)
+
+    # Convert links
+    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<\2|\1>', text)
+
+    # Convert code blocks
+    text = re.sub(r'```(.+?)```', r'```\1```', text, flags=re.DOTALL)
+
+    return text
 
 if __name__ == '__main__':
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
