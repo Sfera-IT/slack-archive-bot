@@ -616,7 +616,7 @@ def generate_digest():
         # Start a new thread section if needed
         if message['thread_ts'] != current_thread:
             current_thread = message['thread_ts']
-            formatted_messages += f"\nThread started at {datetime.datetime.fromtimestamp(float(current_thread)).strftime('%Y-%m-%d %H:%M:%S')}:\n"
+            formatted_messages += f"\nThread started at {datetime.datetime.fromtimestamp(float(current_thread)).strftime('%Y-%m-%d %H:%M:%S')} with timestamp {current_thread}:\n"
 
         # Format the message
         timestamp = datetime.datetime.fromtimestamp(float(message['timestamp'])).strftime('%Y-%m-%d %H:%M:%S')
@@ -640,7 +640,7 @@ def generate_digest():
                 Racconta cosa è successo su ogni canale in maniera descrittiva, ma enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati, fornendo un buon numero di dettagli, 
                 inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. (Attenzione: il nome è sempre prima del messaggio, non dopo)
                 La risposta deve essere in formato markdown.
-                Inserisci sempre un link alle conversazioni più coinvolgenti, il link è nel formato [link](https://slack-archive.sferait.org/getlink?timestamp=MESSAGE_TIMESTAMP).
+                Inserisci sempre un link alle conversazioni più coinvolgenti di ogni canale, il link è nel formato [link](https://slack-archive.sferait.org/getlink?timestamp=MESSAGE_TIMESTAMP) dove MESSAGE_TIMESTAMP è il valore del timestamp del thread esattamente come riportato.
                 PRIMA del riassunto, inserisci una sezione in cui fai un preambolo dicendo quali sono stati i canali più attivi, quali i thread più discussi, e quali sono stati gli argomenti più trattati.
                 Evita commenti rispetto alla vivacita o varietà del gruppo, nei preamboli e conclusioni parla dei fatti e delle conversazioni avvenute, non giudicarne il contenuto. 
                 {formatted_messages}"""}
