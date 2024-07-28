@@ -798,7 +798,7 @@ def get_link():
 
     conn = get_db_connection()
     try:
-        message = conn.execute('SELECT permalink FROM messages WHERE thread_ts LIKE ? order by timestamp', ('%'+timestamp+'%',)).fetchone()
+        message = conn.execute('SELECT permalink FROM messages WHERE thread_ts LIKE ? and permalink != "" order by timestamp', ('%'+timestamp+'%',)).fetchone()
         if message and message['permalink']:
             return redirect(message['permalink'])
         else:
@@ -807,6 +807,8 @@ def get_link():
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
+
+import re
 
 def convert_markdown_to_slack(text):
     # Convert headers
@@ -821,7 +823,14 @@ def convert_markdown_to_slack(text):
     text = re.sub(r'_(.+?)_', r'_\1_', text)
 
     # Convert links
-    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<\2|\1>', text)
+    def replace_link(match):
+        text = match.group(1)
+        url = match.group(2)
+        # Remove any surrounding angle brackets from the URL
+        url = url.strip('<>')
+        return f'<{url}|{text}>'
+
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', replace_link, text)
 
     # Convert code blocks
     text = re.sub(r'```(.+?)```', r'```\1```', text, flags=re.DOTALL)
