@@ -798,7 +798,7 @@ def get_link():
 
     conn = get_db_connection()
     try:
-        message = conn.execute('SELECT permalink FROM messages WHERE timestamp LIKE ?', ('%'+timestamp+'%',)).fetchone()
+        message = conn.execute('SELECT permalink FROM messages WHERE thread_ts LIKE ? order by timestamp', ('%'+timestamp+'%',)).fetchone()
         if message and message['permalink']:
             return redirect(message['permalink'])
         else:
