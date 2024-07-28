@@ -564,7 +564,8 @@ def generate_digest():
     ''').fetchone()
 
     force_generate = request.json.get('force_generate', False)
-    if existing_digest and not force_generate:
+    send_to_channel = request.json.get('send_to_channel', False)
+    if existing_digest and not force_generate and not send_to_channel:
         conn.close()
         return get_response({
             'status': 'success', 
@@ -629,7 +630,7 @@ def generate_digest():
     # Generate summary using OpenAI
     openai.api_key = os.getenv('OPENAI_API_KEY')
     response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 2000 parole, e sempre in italiano."},
             {"role": "user", "content": f"""In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
@@ -662,6 +663,20 @@ def generate_digest():
     ''', (datetime.datetime.utcnow().isoformat(), period, summary, formatted_messages))
     conn.commit()
     conn.close()
+
+    # If send_to_channel is set, send the digest to the channel
+    if send_to_channel:
+        try:
+            message = f"*Digest for {period}*\n\n{summary} \n\n Puoi trovare maggiori informazioni ed eseguire opt-out dalle funzioni AI qui: https://sferaarchive-client.vercel.app/"
+            response = app.client.chat_postMessage(
+                channel='C011CK2HYP9',
+                text=message,
+                parse="full"
+            )
+            if not response['ok']:
+                return get_response({'status': 'error', 'message': 'Failed to send digest to channel'})
+        except Exception as e:
+            return get_response({'status': 'error', 'message': f'Error sending digest to channel: {str(e)}'})
 
     return get_response({'status': 'success', 'digest': summary, 'period': period})
 
@@ -781,7 +796,7 @@ def get_link():
 
     conn = get_db_connection()
     try:
-        message = conn.execute('SELECT permalink FROM messages WHERE timestamp = ?', (timestamp,)).fetchone()
+        message = conn.execute('SELECT permalink FROM messages WHERE timestamp LIKE ?', ('%'+timestamp+'%',)).fetchone()
         if message and message['permalink']:
             return redirect(message['permalink'])
         else:
@@ -790,48 +805,6 @@ def get_link():
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
-
-
-@flask_app.route('/send_digest_to_channel', methods=['GET'])
-def send_digest_to_channel():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    
-    #'C011CK2HYP9'
-    channel_id = 'C02UXPL0ZGS' 
-    if not channel_id:
-        return jsonify({'error': 'No channel_id provided'}), 400
-
-    # Force regenerate the digest
-    digest_response = generate_digest()
-    digest_data = digest_response.get_json()
-
-    if digest_data.get('status') != 'success':
-        return jsonify({'error': 'Failed to generate digest'}), 500
-
-    digest = digest_data['digest']
-    period = digest_data['period']
-
-    # Prepare the message
-    message = f"*Digest for {period}*\n\n{digest}"
-
-    try:
-        # Send the message to the specified channel
-        response = app.client.chat_postMessage(
-            channel=channel_id,
-            text=message,
-            parse="full"
-        )
-        
-        if response['ok']:
-            return jsonify({'status': 'success', 'message': 'Digest sent successfully'}), 200
-        else:
-            return jsonify({'error': 'Failed to send message to channel'}), 500
-    except Exception as e:
-        return jsonify({'error': f'Error sending message: {str(e)}'}), 500
-
 
 if __name__ == '__main__':
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
