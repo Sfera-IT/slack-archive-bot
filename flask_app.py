@@ -637,10 +637,11 @@ def generate_digest():
                 Sono inclusi anche i thread più vecchi di 24 ore se hanno ricevuto una risposta nelle ultime 24 ore. 
                 Il tuo compito è creare un digest discorsivo ma abbastanza dettagliato da fornire agli utenti. 
                 Racconta cosa è successo su ogni canale in maniera descrittiva, ma enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati, fornendo un buon numero di dettagli, 
-                inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. 
+                inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. (Attenzione: il nome è sempre prima del messaggio, non dopo)
                 La risposta deve essere in formato markdown.
+                Inserisci sempre un link alle conversazioni più coinvolgenti, il link è nel formato [link](https://slack-archive.sferait.org/getlink?timestamp=MESSAGE_TIMESTAMP).
                 PRIMA del riassunto, inserisci una sezione in cui fai un preambolo dicendo quali sono stati i canali più attivi, quali i thread più discussi, e quali sono stati gli argomenti più trattati.
-
+                Evita commenti rispetto alla vivacita o varietà del gruppo, nei preamboli e conclusioni parla dei fatti e delle conversazioni avvenute, non giudicarne il contenuto. 
                 {formatted_messages}"""}
         ],
        max_tokens=4096,
@@ -771,6 +772,65 @@ def optout_ai():
             conn.close()
 
     return get_response({'user_id': user, 'opted_out': ret})
+
+@flask_app.route('/getlink', methods=['GET'])
+def get_link():
+    timestamp = request.args.get('timestamp')
+    if not timestamp:
+        return jsonify({'error': 'No timestamp provided'}), 400
+
+    conn = get_db_connection()
+    try:
+        message = conn.execute('SELECT permalink FROM messages WHERE timestamp = ?', (timestamp,)).fetchone()
+        if message and message['permalink']:
+            return redirect(message['permalink'])
+        else:
+            return jsonify({'error': 'Message not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+
+@flask_app.route('/send_digest_to_channel', methods=['GET'])
+def send_digest_to_channel():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)['user_id']
+    if not headers or not user:
+        return redirect(url_for('login'))
+    
+    #'C011CK2HYP9'
+    channel_id = 'C02UXPL0ZGS' 
+    if not channel_id:
+        return jsonify({'error': 'No channel_id provided'}), 400
+
+    # Force regenerate the digest
+    digest_response = generate_digest()
+    digest_data = digest_response.get_json()
+
+    if digest_data.get('status') != 'success':
+        return jsonify({'error': 'Failed to generate digest'}), 500
+
+    digest = digest_data['digest']
+    period = digest_data['period']
+
+    # Prepare the message
+    message = f"*Digest for {period}*\n\n{digest}"
+
+    try:
+        # Send the message to the specified channel
+        response = app.client.chat_postMessage(
+            channel=channel_id,
+            text=message,
+            parse="full"
+        )
+        
+        if response['ok']:
+            return jsonify({'status': 'success', 'message': 'Digest sent successfully'}), 200
+        else:
+            return jsonify({'error': 'Failed to send message to channel'}), 500
+    except Exception as e:
+        return jsonify({'error': f'Error sending message: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
