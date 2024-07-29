@@ -828,7 +828,7 @@ def convert_markdown_to_slack(text):
         url = match.group(2)
         # Remove any surrounding angle brackets from the URL
         url = url.strip('<>')
-        return f'{url}'
+        return f' {url} '
 
     text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', replace_link, text)
 
