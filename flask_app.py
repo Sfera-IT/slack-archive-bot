@@ -599,6 +599,8 @@ def generate_digest():
         user != 'USLACKBOT'
         AND 
         user NOT IN (SELECT user FROM optout_ai)
+        AND
+        channels.id != 'C011CK2HYP9'
     ORDER BY channel_name ASC, thread_ts ASC, timestamp ASC;
     ''').fetchall()
 
