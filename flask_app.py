@@ -600,7 +600,7 @@ def generate_digest():
         AND 
         user NOT IN (SELECT user FROM optout_ai)
         AND
-        channels.id != 'C011CK2HYP9'
+        channels.id != 'C07F6RUTVQW'
     ORDER BY channel_name ASC, thread_ts ASC, timestamp ASC;
     ''').fetchall()
 
@@ -673,7 +673,7 @@ def generate_digest():
             slack_formatted_summary = convert_markdown_to_slack(summary)
             message = f"*Digest for {period}*\n\n{slack_formatted_summary} \n\n Puoi trovare maggiori informazioni ed eseguire opt-out dalle funzioni AI qui: https://sferaarchive-client.vercel.app/"
             response = app.client.chat_postMessage(
-                channel='C011CK2HYP9',
+                channel='C07F6RUTVQW',
                 text=message,
                 parse="full"
             )
