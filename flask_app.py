@@ -839,6 +839,89 @@ def convert_markdown_to_slack(text):
 
     return text
 
+@flask_app.route('/stats', methods=['GET'])
+def get_stats():
+    headers = get_slack_headers()
+    user = verify_token_and_get_user(headers)['user_id']
+    if not headers or not user:
+        return redirect(url_for('login'))
+    if check_optout(user):
+        return get_response({'error': 'User opted out of archiving'})
+
+    # Get the time period from the request, default to 30 days
+    days = request.args.get('days', 30, type=int)
+
+    conn = get_db_connection()
+    stats = {}
+
+    # 1. User activity ranking
+    user_activity = conn.execute('''
+        SELECT users.name, COUNT(*) as post_count
+        FROM messages
+        JOIN users ON messages.user = users.id
+        WHERE datetime(messages.timestamp, 'unixepoch') > datetime('now', ?)
+        GROUP BY users.id
+        ORDER BY post_count DESC
+    ''', (f'-{days} days',)).fetchall()
+    stats['user_activity'] = [dict(row) for row in user_activity]
+
+    # 2. Top 5 active channels
+    top_channels = conn.execute('''
+        SELECT channels.name, COUNT(*) as message_count
+        FROM messages
+        JOIN channels ON messages.channel = channels.id
+        WHERE datetime(messages.timestamp, 'unixepoch') > datetime('now', ?)
+        GROUP BY channels.id
+        ORDER BY message_count DESC
+        LIMIT 5
+    ''', (f'-{days} days',)).fetchall()
+    stats['top_channels'] = [dict(row) for row in top_channels]
+
+    # 3. Thread and post trends per channel
+    channel_trends = conn.execute('''
+        SELECT 
+            channels.name,
+            COUNT(DISTINCT CASE WHEN messages.thread_ts IS NOT NULL THEN messages.thread_ts ELSE messages.timestamp END) as thread_count,
+            COUNT(*) as total_posts
+        FROM messages
+        JOIN channels ON messages.channel = channels.id
+        WHERE datetime(messages.timestamp, 'unixepoch') > datetime('now', ?)
+        GROUP BY channels.id
+        ORDER BY total_posts DESC
+    ''', (f'-{days} days',)).fetchall()
+    stats['channel_trends'] = [dict(row) for row in channel_trends]
+
+    # 4. Most active hours
+    active_hours = conn.execute('''
+        SELECT 
+            CAST(strftime('%H', datetime(timestamp, 'unixepoch')) AS INTEGER) as hour,
+            COUNT(*) as message_count
+        FROM messages
+        WHERE datetime(timestamp, 'unixepoch') > datetime('now', ?)
+        GROUP BY hour
+        ORDER BY message_count DESC
+    ''', (f'-{days} days',)).fetchall()
+    stats['active_hours'] = [dict(row) for row in active_hours]
+
+    # 5. Emoji usage
+    emoji_usage = conn.execute('''
+        SELECT 
+            substr(message, instr(message, ':') + 1, 
+                   instr(substr(message, instr(message, ':') + 1), ':') - 1) as emoji,
+            COUNT(*) as usage_count
+        FROM messages
+        WHERE message LIKE '%:%:%'
+        AND datetime(timestamp, 'unixepoch') > datetime('now', ?)
+        GROUP BY emoji
+        ORDER BY usage_count DESC
+        LIMIT 10
+    ''', (f'-{days} days',)).fetchall()
+    stats['emoji_usage'] = [dict(row) for row in emoji_usage]
+
+    conn.close()
+
+    return get_response(stats)
+
 if __name__ == '__main__':
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
     flask_app.run(debug=debug_mode)
