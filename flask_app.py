@@ -941,7 +941,8 @@ def get_stats():
             channels.name AS channel,
             messages.message AS thread_start,
             datetime(messages.timestamp, 'unixepoch') AS thread_date,
-            COUNT(*) AS reply_count
+            COUNT(*) AS reply_count,
+            messages.timestamp as thread_ts
         FROM messages
         JOIN users ON messages.user = users.id
         JOIN channels ON messages.channel = channels.id
