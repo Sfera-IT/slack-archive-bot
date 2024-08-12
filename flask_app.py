@@ -75,7 +75,7 @@ def oauth_callback():
         'redirect_uri': url_for('oauth_callback', _external=True, _scheme='https')
     })
 
-    response_data = response.json()
+    response_data = response.json() 
 
     if not response_data.get('ok'):
         return 'Failed to authenticate with Slack.', 400
@@ -917,6 +917,86 @@ def get_stats():
         LIMIT 10
     ''', (f'-{days} days',)).fetchall()
     stats['emoji_usage'] = [dict(row) for row in emoji_usage]
+
+    # immagini postate per autore - si identificano perchè nel testo c'è scritto "Il messaggio conteneva un media ma non è stato possibile salvarlo"
+    images_by_author = conn.execute('''
+        SELECT 
+            users.name,
+            COUNT(*) as image_count
+        FROM messages
+        JOIN users ON messages.user = users.id
+        WHERE messages.message LIKE '%Il messaggio conteneva un media ma non è stato possibile salvarlo%'
+        AND datetime(messages.timestamp, 'unixepoch') > datetime('now', ?)
+        GROUP BY users.id
+        ORDER BY image_count DESC
+        LIMIT 10
+    ''', (f'-{days} days',)).fetchall()
+    stats['images_by_author'] = [dict(row) for row in images_by_author]
+
+
+    # 10 thread più ingaggianti (con nome dell'autore e data del messaggio)
+    engaging_threads = conn.execute('''
+        SELECT 
+            users.name AS author,
+            channels.name AS channel,
+            messages.message AS thread_start,
+            datetime(messages.timestamp, 'unixepoch') AS thread_date,
+            COUNT(*) AS reply_count
+        FROM messages
+        JOIN users ON messages.user = users.id
+        JOIN channels ON messages.channel = channels.id
+        WHERE messages.thread_ts IS NOT NULL
+        AND datetime(messages.thread_ts, 'unixepoch') > datetime('now', ?)
+        GROUP BY messages.thread_ts
+        ORDER BY reply_count DESC
+        LIMIT 10
+    ''', (f'-{days} days',)).fetchall()
+    stats['engaging_threads'] = [dict(row) for row in engaging_threads]
+
+    # 10 autori con i thread più ingaggianti e lunghezza media dei loro thread
+    engaging_authors = conn.execute('''
+        WITH thread_stats AS (
+            SELECT 
+                users.name AS author,
+                channels.name AS channel,
+                messages.message AS thread_start,
+                datetime(messages.timestamp, 'unixepoch') AS thread_date,
+                COUNT(*) AS reply_count,
+                messages.thread_ts
+            FROM messages
+            JOIN users ON messages.user = users.id
+            JOIN channels ON messages.channel = channels.id
+            WHERE messages.thread_ts IS NOT NULL
+                AND datetime(messages.thread_ts, 'unixepoch') > datetime('now', ?)
+            GROUP BY messages.thread_ts
+            ORDER BY reply_count DESC
+        )
+        SELECT 
+            COUNT(*) AS number_of_threads, 
+            author,
+            AVG(reply_count) AS avg_replies
+        FROM thread_stats 
+        WHERE author <> 'Slackbot'
+        GROUP BY author
+        ORDER BY number_of_threads DESC;
+    ''', (f'-{days} days',)).fetchall()
+    stats['engaging_authors'] = [dict(row) for row in engaging_authors]
+
+    # classifica degli utenti più attivi ma basata sul numero totale di parole scritte
+    active_users_by_words = conn.execute('''
+        SELECT 
+            users.name AS author,
+            SUM(LENGTH(messages.message) - LENGTH(REPLACE(messages.message, ' ', '')) + 1) AS total_words,
+            COUNT(*) AS total_messages,
+            AVG(LENGTH(messages.message) - LENGTH(REPLACE(messages.message, ' ', '')) + 1) AS avg_words_per_message
+        FROM messages
+        JOIN users ON messages.user = users.id
+        WHERE datetime(messages.timestamp, 'unixepoch') > datetime('now', ?)
+        GROUP BY users.id
+        ORDER BY total_words DESC
+        LIMIT 10
+    ''', (f'-{days} days',)).fetchall()
+    stats['active_users_by_words'] = [dict(row) for row in active_users_by_words]
 
     conn.close()
 
