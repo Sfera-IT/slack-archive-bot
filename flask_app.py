@@ -979,7 +979,7 @@ def get_stats():
         FROM thread_stats 
         WHERE author <> 'Slackbot'
         GROUP BY author
-        ORDER BY number_of_threads DESC;
+        ORDER BY avg_replies DESC;
     ''', (f'-{days} days',)).fetchall()
     stats['engaging_authors'] = [dict(row) for row in engaging_authors]
 
