@@ -635,7 +635,7 @@ def generate_digest():
     response = openai.ChatCompletion.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 2000 parole, e sempre in italiano."},
+            {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati oltre 1000 parole, sempre in italiano."},
             {"role": "user", "content": f"""In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
                 L'estrazione contiene tutti i messaggi inviati sul workspace, suddivisi in canali e thread. 
                 Sono inclusi anche i thread più vecchi di 24 ore se hanno ricevuto una risposta nelle ultime 24 ore. 
