@@ -633,7 +633,7 @@ def generate_digest():
     # Generate summary using OpenAI
     openai.api_key = os.getenv('OPENAI_API_KEY')
     response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 2000 parole, e sempre in italiano."},
             {"role": "user", "content": f"""In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
