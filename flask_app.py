@@ -639,17 +639,26 @@ def generate_digest():
     response = openai.ChatCompletion.create(
         model="gpt-4o-2024-08-06",
         messages=[
-            {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 2000 parole, e sempre in italiano."},
-            {"role": "user", "content": f"""In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
-                L'estrazione contiene tutti i messaggi inviati sul workspace, suddivisi in canali e thread. 
-                Sono inclusi anche i thread più vecchi di 24 ore se hanno ricevuto una risposta nelle ultime 24 ore. 
-                Il tuo compito è creare un digest discorsivo ma abbastanza dettagliato da fornire agli utenti. 
-                Racconta cosa è successo su ogni canale in maniera descrittiva, ma enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati, fornendo un buon numero di dettagli, 
-                inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. (Attenzione: il nome è sempre prima del messaggio, non dopo)
-                La risposta deve essere in formato markdown.
-                Inserisci sempre un link alle conversazioni più coinvolgenti di ogni canale, il link è nel formato [link](https://slack-archive.sferait.org/getlink?timestamp=MESSAGE_TIMESTAMP) dove MESSAGE_TIMESTAMP è il valore del timestamp del thread esattamente come riportato.
-                PRIMA del riassunto, inserisci una sezione in cui fai un preambolo dicendo quali sono stati i canali più attivi, quali i thread più discussi, e quali sono stati gli argomenti più trattati.
-                Evita commenti rispetto alla vivacita o varietà del gruppo, nei preamboli e conclusioni parla dei fatti e delle conversazioni avvenute, non giudicarne il contenuto. 
+            {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano."},
+            {"role": "user", "content": f"""
+Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano.
+In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
+
+Dettagli sull’estrazione:
+- L'estrazione contiene tutti i messaggi inviati sul workspace, suddivisi in canali e thread. 
+- Sono inclusi anche i thread più vecchi di 24 ore se hanno ricevuto una risposta nelle ultime 24 ore. 
+               
+Il tuo compito è creare un digest:
+- La prima parte del digest è un indice: deve contenere un elenco puntato, estremamente conciso ma dettagliato, di TUTTI gli argomenti trattati, TUTTI I THREAD, uno per uno. Per ogni argomento una breve descrizione, chi ha aperto il thread e link al thread (tutto sulla stessa riga)
+- La seconda parte del Digest è invece discorsiva, rimanendo sempre dettagliata e sui fatti, non essere troppo generico: racconta cosa è successo su ogni canale in maniera descrittiva, enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati (fornendo un buon numero di dettagli), inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. Anche in questo caso, inserisci sempre il link alle conversazioni citate.
+
+Altri importanti dettagli:
+- La risposta deve essere in formato markdown.
+- Inserisci sempre un link alle conversazioni più coinvolgenti di ogni canale, il link è nel formato [link](https://slack-archive.sferait.org/getlink?timestamp=MESSAGE_TIMESTAMP) dove MESSAGE_TIMESTAMP è il valore del timestamp del thread esattamente come riportato.
+- Evita commenti rispetto alla vivacita o varietà del gruppo, rimani sempre fattuale, parla dei fatti e delle conversazioni avvenute, non giudicarne il contenuto. 
+- È importante che il digest raccolga tutte le conversazioni delle ultime ore e non ne escluda nessuna.
+- Ricorda che il nome dell’utente che ha inviato il post o ha avviato la conversazione è sempre PRIMA del messaggio, non dopo
+
                 {formatted_messages}"""}
         ],
        # max_tokens=4096,
