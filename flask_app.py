@@ -20,6 +20,7 @@ def auth_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         headers = get_slack_headers()
+        g.headers = headers
         user_info = verify_token_and_get_user(headers)
         if not headers or not user_info:
             return redirect(url_for('login'))
@@ -32,6 +33,14 @@ def auth_required(f):
         g.opted_out_ai = conn.execute('SELECT * FROM optout_ai WHERE user = ?', (g.user_id,)).fetchone() is not None
         conn.close()
         
+        return f(*args, **kwargs)
+    return decorated_function
+
+def optin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if check_optout(g.user_id):
+            return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -123,17 +132,10 @@ def get_slack_headers():
 
 
 @flask_app.route('/emoji', methods=['GET'])
+@auth_required
 def get_emoji():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    slack_token = verify_token_and_get_user(headers)['slack_token']
-
-    if not headers or not user:
-        return redirect(url_for('login'))
-    
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
-    
+    slack_token = verify_token_and_get_user(g.headers)['slack_token']
+        
     response = requests.get('https://slack.com/api/emoji.list', headers={'Authorization': 'Bearer ' + slack_token})
     data = response.json()
 
@@ -204,11 +206,9 @@ def notify_users(users, text):
 
 
 @flask_app.route('/optout', methods=['GET'])
+@auth_required
 def optout():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
+    user = g.user_id
 
     conn = get_db_connection()
     cursor = None
@@ -247,11 +247,9 @@ def optout():
 
 
 @flask_app.route('/channels', methods=['GET'])
+@auth_required
+@optin_required
 def get_channels():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
     conn = get_db_connection()
     channels = conn.execute('SELECT * FROM channels WHERE is_private = 0 ORDER BY name').fetchall()
     conn.close()
@@ -259,14 +257,9 @@ def get_channels():
 
 
 @flask_app.route('/users', methods=['GET'])
-def get_users():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
-    
+@auth_required
+@optin_required
+def get_users():    
     conn = get_db_connection()
     users = conn.execute('SELECT * FROM users').fetchall()
     conn.close()
@@ -283,14 +276,9 @@ def check_optout(user):
 
 
 @flask_app.route('/messages/<channel_id>', methods=['GET'])
+@auth_required
+@optin_required
 def get_messages(channel_id):
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
-    
     conn = get_db_connection()
     offset = request.args.get('offset', 0)
     limit = request.args.get('limit', 20)
@@ -327,15 +315,9 @@ def get_messages(channel_id):
 
 
 @flask_app.route('/thread/<message_id>', methods=['GET'])
+@auth_required
+@optin_required
 def get_thread(message_id):
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
-
     conn = get_db_connection()
     thread = conn.execute('''
         SELECT
@@ -356,47 +338,10 @@ def get_thread(message_id):
     return get_response([dict(ix) for ix in thread])
 
 
-@flask_app.route('/search', methods=['GET'])
-def search_messages():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
-
-    query = request.args.get('query', '')
-    conn = get_db_connection()
-    messages = conn.execute('''
-        SELECT
-        messages.message,
-        messages.user,
-        messages.channel,
-        messages.timestamp,
-        messages.permalink,
-        messages.thread_ts, 
-        users.name as user_name 
-        FROM messages 
-        JOIN users ON messages.user = users.id 
-        WHERE (message LIKE ? OR users.name LIKE ?)
-        AND user NOT IN (SELECT user FROM optout)
-        ORDER BY timestamp DESC
-        ''', 
-        ('%' + query + '%','%' + query + '%',)).fetchall()
-    conn.close()
-    return get_response([dict(ix) for ix in messages])
-
-
 @flask_app.route('/searchV2', methods=['GET'])
+@auth_required
+@optin_required
 def search_messages_V2():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
-
     # Get search parameters
     query = request.args.get('query', '')
     user_name = request.args.get('user_name', '')
@@ -465,14 +410,9 @@ def search_messages_V2():
 
 
 @flask_app.route('/searchEmbeddings', methods=['GET'])
+@auth_required
+@optin_required
 def search_messages_embeddings():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
-
     # Get search parameters
     query = request.args.get('query', '')
     user_name = request.args.get('user_name', '')
@@ -561,19 +501,14 @@ def search_messages_embeddings():
 
 
 @flask_app.route('/generate_digest', methods=['POST'])
+@auth_required
+@optin_required
 def generate_digest():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
-
     conn = get_db_connection()
 
     # before executing the query, check if a digest already exist in the last 24 hours. If yes, return the saved digest
     # unless there is a parameter "force_generate"
-    
+
     existing_digest = conn.execute('''
     SELECT digest, period FROM digests
     WHERE timestamp >= datetime('now', '-1 day')
@@ -658,23 +593,23 @@ def generate_digest():
         messages=[
             {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano."},
             {"role": "user", "content": f"""
-Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano.
-In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
+                Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano.
+                In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
 
-Dettagli sull’estrazione:
-- L'estrazione contiene tutti i messaggi inviati sul workspace, suddivisi in canali e thread. 
-- Sono inclusi anche i thread più vecchi di 24 ore se hanno ricevuto una risposta nelle ultime 24 ore. 
-               
-Il tuo compito è creare un digest:
-- La prima parte del digest è un indice: deve contenere un elenco puntato, estremamente conciso ma dettagliato, di TUTTI gli argomenti trattati, TUTTI I THREAD, uno per uno. Per ogni argomento una breve descrizione, chi ha aperto il thread e link al thread (tutto sulla stessa riga)
-- La seconda parte del Digest è invece discorsiva, rimanendo sempre dettagliata e sui fatti, non essere troppo generico: racconta cosa è successo su ogni canale in maniera descrittiva, enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati (fornendo un buon numero di dettagli), inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. Anche in questo caso, inserisci sempre il link alle conversazioni citate.
+                Dettagli sull’estrazione:
+                - L'estrazione contiene tutti i messaggi inviati sul workspace, suddivisi in canali e thread. 
+                - Sono inclusi anche i thread più vecchi di 24 ore se hanno ricevuto una risposta nelle ultime 24 ore. 
+                            
+                Il tuo compito è creare un digest:
+                - La prima parte del digest è un indice: deve contenere un elenco puntato, estremamente conciso ma dettagliato, di TUTTI gli argomenti trattati, TUTTI I THREAD, uno per uno. Per ogni argomento una breve descrizione, chi ha aperto il thread e link al thread (tutto sulla stessa riga)
+                - La seconda parte del Digest è invece discorsiva, rimanendo sempre dettagliata e sui fatti, non essere troppo generico: racconta cosa è successo su ogni canale in maniera descrittiva, enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati (fornendo un buon numero di dettagli), inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. Anche in questo caso, inserisci sempre il link alle conversazioni citate.
 
-Altri importanti dettagli:
-- La risposta deve essere in formato markdown.
-- Inserisci sempre un link alle conversazioni più coinvolgenti di ogni canale, il link è nel formato [link](https://slack-archive.sferait.org/getlink?timestamp=MESSAGE_TIMESTAMP) dove MESSAGE_TIMESTAMP è il valore del timestamp del thread esattamente come riportato.
-- Evita commenti rispetto alla vivacita o varietà del gruppo, rimani sempre fattuale, parla dei fatti e delle conversazioni avvenute, non giudicarne il contenuto. 
-- È importante che il digest raccolga tutte le conversazioni delle ultime ore e non ne escluda nessuna.
-- Ricorda che il nome dell’utente che ha inviato il post o ha avviato la conversazione è sempre PRIMA del messaggio, non dopo
+                Altri importanti dettagli:
+                - La risposta deve essere in formato markdown.
+                - Inserisci sempre un link alle conversazioni più coinvolgenti di ogni canale, il link è nel formato [link](https://slack-archive.sferait.org/getlink?timestamp=MESSAGE_TIMESTAMP) dove MESSAGE_TIMESTAMP è il valore del timestamp del thread esattamente come riportato.
+                - Evita commenti rispetto alla vivacita o varietà del gruppo, rimani sempre fattuale, parla dei fatti e delle conversazioni avvenute, non giudicarne il contenuto. 
+                - È importante che il digest raccolga tutte le conversazioni delle ultime ore e non ne escluda nessuna.
+                - Ricorda che il nome dell’utente che ha inviato il post o ha avviato la conversazione è sempre PRIMA del messaggio, non dopo
 
                 {formatted_messages}"""}
         ],
@@ -716,13 +651,10 @@ Altri importanti dettagli:
 
 
 @flask_app.route('/digest_details', methods=['POST'])
+@auth_required
+@optin_required
 def digest_details():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
+    user = g.user_id
 
     # Get the query from the POST request
     data = request.get_json()
@@ -789,11 +721,9 @@ def digest_details():
 
 
 @flask_app.route('/optout_ai', methods=['GET'])
+@auth_required
 def optout_ai():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
+    user = g.user_id
 
     conn = get_db_connection()
     cursor = None
@@ -825,6 +755,8 @@ def optout_ai():
 
 
 @flask_app.route('/getlink', methods=['GET'])
+@auth_required
+@optin_required
 def get_link():
     timestamp = request.args.get('timestamp')
     if not timestamp:
@@ -872,14 +804,9 @@ def convert_markdown_to_slack(text):
 
 
 @flask_app.route('/stats', methods=['GET'])
+@auth_required
+@optin_required
 def get_stats():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    if not headers or not user:
-        return redirect(url_for('login'))
-    if check_optout(user):
-        return get_response({'error': 'User opted out of archiving'})
-
     # Get the time period from the request, default to 30 days
     days = request.args.get('days', 30, type=int)
 
