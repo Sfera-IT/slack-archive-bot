@@ -13,6 +13,27 @@ import numpy as np
 import openai
 from datetime import timedelta
 import re
+from functools import wraps
+from flask import g, redirect, url_for
+
+def auth_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        headers = get_slack_headers()
+        user_info = verify_token_and_get_user(headers)
+        if not headers or not user_info:
+            return redirect(url_for('login'))
+        
+        g.user_id = user_info['user_id']
+        g.username = get_username(g.user_id)
+        
+        conn = get_db_connection()
+        g.opted_out = conn.execute('SELECT * FROM optout WHERE user = ?', (g.user_id,)).fetchone() is not None
+        g.opted_out_ai = conn.execute('SELECT * FROM optout_ai WHERE user = ?', (g.user_id,)).fetchone() is not None
+        conn.close()
+        
+        return f(*args, **kwargs)
+    return decorated_function
 
 
 load_dotenv()
@@ -114,8 +135,6 @@ def get_emoji():
         return get_response({'error': 'User opted out of archiving'})
     
     response = requests.get('https://slack.com/api/emoji.list', headers={'Authorization': 'Bearer ' + slack_token})
-    print(response)
-    print(response.json())
     data = response.json()
 
     if not data.get('ok'):
@@ -160,21 +179,17 @@ def get_channels_options():
 
 
 @flask_app.route('/whoami', methods=['GET'])
+@auth_required
 def whoami():
-    headers = get_slack_headers()
-    user = verify_token_and_get_user(headers)['user_id']
-    username = get_username(user)
+    user = g.user_id
+    username = g.username
+    opted_out_ai = g.opted_out_ai
+
     conn = get_db_connection()
     status = conn.execute('SELECT * FROM optout WHERE user = ?', (user,)).fetchone()
-    opted_out_ai = conn.execute('SELECT * FROM optout_ai WHERE user = ?', (user,)).fetchone()
-    if opted_out_ai:
-        opted_out_ai = True
-    else:
-        opted_out_ai = False
 
     conn.close()
-    if not headers or not user:
-        return redirect(url_for('login'))
+
     if status:
         return get_response({'user_id': user, 'username': username, 'opted_out': True, 'opted_out_ai': opted_out_ai})
     return get_response({'user_id': user, 'username': username, 'opted_out': False, 'opted_out_ai': opted_out_ai})
