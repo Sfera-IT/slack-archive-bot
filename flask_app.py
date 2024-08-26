@@ -42,9 +42,11 @@ def apply_cors_headers(response):
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
     return response
 
+
 def get_response(data):
     response = jsonify(data)
     return response
+
 
 def get_db_connection():
     cur_dir = os.path.dirname(__file__)
@@ -52,6 +54,7 @@ def get_db_connection():
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 @flask_app.route('/login')
 def login():
@@ -61,6 +64,7 @@ def login():
         f"&redirect_uri=https://slack-archive.sferait.org/oauth_callback"
     )
     return redirect(slack_auth_url)
+
 
 @flask_app.route('/oauth_callback')
 def oauth_callback():
@@ -88,6 +92,7 @@ def oauth_callback():
     
     return redirect(CLIENT_URL + "?token="+jwt_token)
 
+
 def get_slack_headers():
     # get headers from the request
     headers = request.headers
@@ -95,19 +100,6 @@ def get_slack_headers():
         return {'Authorization': headers['Authorization']}
     return None
 
-# disabled slack token validation and replaced with jwt token validation
-# def verify_token(headers):
-#     response = requests.get('https://slack.com/api/auth.test', headers=headers)
-#     data = response.json()
-
-#     if not data.get('ok'):
-#         return False
-    
-#     # Verifica se il token è valido per il workspace e l'app specificati
-#     if data.get('team_id') != EXPECTED_TEAM_ID:
-#         return False
-    
-#     return True
 
 @flask_app.route('/emoji', methods=['GET'])
 def get_emoji():
@@ -154,15 +146,18 @@ def verify_token_and_get_user(headers):
         return False
     return False
 
+
 def get_username(user):
     conn = get_db_connection()
     user = conn.execute('SELECT name FROM users WHERE id = ?', (user,)).fetchone()
     conn.close()
     return user['name']
 
+
 @flask_app.route('/channels', methods=['OPTIONS'])
 def get_channels_options():
     return get_response({})
+
 
 @flask_app.route('/whoami', methods=['GET'])
 def whoami():
@@ -191,6 +186,7 @@ def notify_users(users, text):
             channel=user,
             text=text
         )
+
 
 @flask_app.route('/optout', methods=['GET'])
 def optout():
@@ -234,6 +230,7 @@ def optout():
 
     return get_response({'user_id': user, 'opted_out': True})
 
+
 @flask_app.route('/channels', methods=['GET'])
 def get_channels():
     headers = get_slack_headers()
@@ -244,6 +241,7 @@ def get_channels():
     channels = conn.execute('SELECT * FROM channels WHERE is_private = 0 ORDER BY name').fetchall()
     conn.close()
     return get_response([dict(ix) for ix in channels])
+
 
 @flask_app.route('/users', methods=['GET'])
 def get_users():
@@ -259,6 +257,7 @@ def get_users():
     conn.close()
     return get_response([dict(ix) for ix in users])
 
+
 def check_optout(user):
     conn = get_db_connection()
     status = conn.execute('SELECT * FROM optout WHERE user = ?', (user,)).fetchone()
@@ -266,6 +265,7 @@ def check_optout(user):
     if status:
         return True
     return False
+
 
 @flask_app.route('/messages/<channel_id>', methods=['GET'])
 def get_messages(channel_id):
@@ -310,6 +310,7 @@ def get_messages(channel_id):
         
     return get_response([dict(ix) for ix in messages])
 
+
 @flask_app.route('/thread/<message_id>', methods=['GET'])
 def get_thread(message_id):
     headers = get_slack_headers()
@@ -338,6 +339,7 @@ def get_thread(message_id):
         (message_id, message_id)).fetchall()
     conn.close()
     return get_response([dict(ix) for ix in thread])
+
 
 @flask_app.route('/search', methods=['GET'])
 def search_messages():
@@ -369,7 +371,6 @@ def search_messages():
         ('%' + query + '%','%' + query + '%',)).fetchall()
     conn.close()
     return get_response([dict(ix) for ix in messages])
-
 
 
 @flask_app.route('/searchV2', methods=['GET'])
@@ -542,6 +543,7 @@ def search_messages_embeddings():
         d['distance'] = str(d['distance'])
 
     return get_response(distances)
+
 
 @flask_app.route('/generate_digest', methods=['POST'])
 def generate_digest():
@@ -770,6 +772,7 @@ def digest_details():
 
     return get_response({'status': 'success', 'details': details})
 
+
 @flask_app.route('/optout_ai', methods=['GET'])
 def optout_ai():
     headers = get_slack_headers()
@@ -805,6 +808,7 @@ def optout_ai():
 
     return get_response({'user_id': user, 'opted_out': ret})
 
+
 @flask_app.route('/getlink', methods=['GET'])
 def get_link():
     timestamp = request.args.get('timestamp')
@@ -823,7 +827,6 @@ def get_link():
     finally:
         conn.close()
 
-import re
 
 def convert_markdown_to_slack(text):
     # Convert headers
@@ -851,6 +854,7 @@ def convert_markdown_to_slack(text):
     text = re.sub(r'```(.+?)```', r'```\1```', text, flags=re.DOTALL)
 
     return text
+
 
 @flask_app.route('/stats', methods=['GET'])
 def get_stats():
@@ -1015,6 +1019,7 @@ def get_stats():
     conn.close()
 
     return get_response(stats)
+
 
 if __name__ == '__main__':
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
