@@ -459,7 +459,7 @@ def search_messages_embeddings():
         sql += ' AND CAST(messages.timestamp AS FLOAT) <= ?'
         params.append(end_timestamp)
 
-    sql += ' ORDER BY messages.timestamp DESC'
+    sql += ' ORDER BY messages.timestamp DESC LIMIT 200'
 
     messages = conn.execute(sql, params).fetchall()
 
@@ -755,8 +755,6 @@ def optout_ai():
 
 
 @flask_app.route('/getlink', methods=['GET'])
-@auth_required
-@optin_required
 def get_link():
     timestamp = request.args.get('timestamp')
     if not timestamp:
@@ -801,6 +799,46 @@ def convert_markdown_to_slack(text):
     text = re.sub(r'```(.+?)```', r'```\1```', text, flags=re.DOTALL)
 
     return text
+
+
+@flask_app.route('/chat', methods=['POST'])
+@auth_required
+@optin_required
+def chat():
+    user = g.user_id
+    data = request.get_json()
+    message = data.get('message')
+    context = data.get('context', [])
+    conversation = data.get('conversation', [])
+    if not message:
+        return jsonify({'error': 'No message provided'}), 400
+
+    # Prepare context for OpenAI
+    context_text = "\n".join([f"{msg['user_name']}: {msg['message']}" for msg in context])
+    conversation_text = "\n".join([f"{msg['user_name']}: {msg['message']}" for msg in conversation])
+    prompt = f"Context:\n{context_text}\n\nConversation:\n{conversation_text}\n\nUser: {message}\nAI:"
+
+    # Call OpenAI
+    openai.api_key = os.getenv('OPENAI_API_KEY')
+    response = openai.ChatCompletion.create(
+        model="gpt-4o-2024-08-06",
+        messages=[
+            {"role": "system", "content": "Sei un assistente che risponde alle domande relative alle conversazioni di un workspace di Slack. Ti verranno passate delle conversazioni e una serie di domande a cui dovrai rispondere con precisione."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=4096,
+        request_timeout=600
+    )
+
+    ai_response = response.choices[0].message['content'].strip()
+    conversation.append({
+        'user_name': 'AI',
+        'message': ai_response,
+        'timestamp': datetime.datetime.utcnow().timestamp()
+    })
+
+    return jsonify({'status': 'success', 'conversation': conversation})
+
 
 
 @flask_app.route('/stats', methods=['GET'])
