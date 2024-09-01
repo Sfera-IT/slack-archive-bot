@@ -6,7 +6,6 @@ import shlex
 from sentence_transformers import SentenceTransformer
 import numpy as np
 
-
 from slack_bolt import App
 
 from utils import db_connect, migrate_db
@@ -74,6 +73,7 @@ def update_users(conn, cursor):
     cursor.executemany("INSERT INTO users(name, id, avatar) VALUES(?,?,?)", args)
     conn.commit()
 
+
 def create_embeddings(message):
     try:
         model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
@@ -81,6 +81,7 @@ def create_embeddings(message):
     except:
         embeddings = ""
     return embeddings
+
 
 def get_channel_info(channel_id):
     channel = app.client.conversations_info(channel=channel_id)["channel"]
@@ -130,247 +131,7 @@ def update_channels(conn, cursor):
 def handle_query(event, cursor, say):
     say("Questa interfaccia è stata disattivata. Ora puoi andare qui: https://sferaarchive-client.vercel.app/")
     return
-    """
-    Handles a DM to the bot that is requesting a search of the archives.
 
-    Usage:
-
-        <query> from:<user> in:<channel> sort:asc|desc limit:<number>
-
-        query: The text to search for.
-        user: If you want to limit the search to one user, the username.
-        channel: If you want to limit the search to one channel, the channel name.
-        sort: Either asc if you want to search starting with the oldest messages,
-            or desc if you want to start from the newest. Default asc.
-        limit: The number of responses to return. Default 10.
-
-    Special Commands (not returned in usage_text):
-        inactive:N Returns the users inactive in the last N days (no messages sent). Example inactive:30
-        topusers:N Shows a list of the most active users (number of messages sent) on the last N days
-    """
-    try:
-        usage_text= "*Usage*:\n\n\t"\
-                    "<query> from:<user> in:<channel> sort:asc|desc limit:<number>\n\n\n*"\
-                    "NOTE*: \n\n 1) the BOT search all the terms, if you want to search for the exact phrase use quotes around the 'search terms' \n\n"\
-                    "2) if your search term contains quotes, escape it with a \\ slash before, like this: I\\'m \n\n\n"\
-                    "*Params*\n\n\t"\
-                    "query: The text to search for.\n\t"\
-                    "user: If you want to limit the search to one user, the username. For space separated nicknames, use double quotes in this way 'from:\"name surname\" query' \n\t"\
-                    "channel: If you want to limit the search to one channel, the channel name.\n\t"\
-                    "sort: Either asc if you want to search starting with the oldest messages, or desc if you want to start from the newest. Default asc.\n\t"\
-                    "limit: The number of responses to return. Default 10.\n\n\n"\
-                    "*Special Commands*\n\n\t"\
-                    "!topusers:N Shows a list of the most active users (number of messages sent) on the last N days + bonus info :-) \n\t"\
-                    "!inactive:N Shows a list of the inactive users (no messages) on the last N days"
-
-        text = []
-        user_name = None
-        channel_name = None
-        sort = None
-        limit = 10
-
-        s = event["text"].lower()
-        
-        # split except when surrounded by quotes
-        # john doe is splitted in 'john' and 'doe'
-        # 'john doe' is splitted in 'john doe'
-        params = shlex.split(s)
-
-        if len(params) == 1:
-            if params[0] == "!help":
-                say(usage_text)
-                return None
-
-        for p in params:
-            # Handle emoji
-            # usual format is " :smiley_face: "
-            if len(p) > 2 and p[0] == ":" and p[-1] == ":":
-                text.append(p)
-                continue
-
-            p = p.split(":")
-
-            if len(p) == 1:
-                text.append(p[0])
-            if len(p) == 2:
-                # workaround: since url contains colons ":" the split interpret it as a parameter
-                # so we re-assemble it
-                if p[0] in ['<http', '<https', 'http', 'https']:
-                    text.append(p[0]+":"+p[1])
-                if p[0] == "from":
-                    user_name = p[1]
-                if p[0] == "in":
-                    channel_name = p[1].replace("#", "").strip()
-                if p[0] == "sort":
-                    if p[1] in ["asc", "desc"]:
-                        sort = p[1]
-                    else:
-                        raise ValueError("Invalid sort order %s" % p[1])
-                if p[0] == "limit":
-                    try:
-                        limit = int(p[1])
-                    except:
-                        raise ValueError("%s not a valid number" % p[1])
-                # if p[0] == "maintenance":
-                #     say(maintenance(p[1]))
-                #     return
-                if p[0] == "!inactive":
-                    say(inactive(p[1]))
-                    return
-                if p[0] == "!topusers":
-                    say(topusers(p[1]))
-                    return
-                # if p[0] == "oblivion":
-                #     say(oblivion(p[1]))
-
-        query = f"""
-            SELECT DISTINCT
-                messages.message, messages.user, messages.timestamp, messages.channel, messages.permalink
-            FROM messages
-            INNER JOIN users ON messages.user = users.id
-            -- Only query channel that archive bot is a part of
-            INNER JOIN (
-                SELECT * FROM channels
-                INNER JOIN members ON
-                    channels.id = members.channel AND
-                    members.user = (?)
-            ) as channels ON messages.channel = channels.id
-            INNER JOIN members ON channels.id = members.channel
-            WHERE
-                -- Only return messages that are in public channels or the user is a member of
-                (channels.is_private <> 1 OR members.user = (?)) AND
-                
-        """
-
-        # Search for each search term in any order, duplicating the LIKE clause for each text element
-        text = ['%'+item+'%' for item in text]
-        elements = len(text)
-        message_str = 'messages.message LIKE (?) AND ' * elements
-        # remove last AND
-        message_str = message_str[:len(message_str) - 5]
-        # concatenate the clause
-        query = query + message_str
-        query_args = [app._bot_user_id, event["user"]]
-        # add the arguments for the parametrized query
-        query_args.extend(text)
-
-        if elements == 0:
-            query += "1 "
-
-        if user_name:
-            query += " AND users.name LIKE (?)"
-            query_args.append(user_name)
-        if channel_name:
-            query += " AND channels.name = (?)"
-            query_args.append(channel_name)
-        if sort:
-            query += " ORDER BY messages.timestamp %s" % sort
-
-        logger.debug(query)
-        logger.debug(query_args)
-
-        cursor.execute(query, query_args)
-
-        res = cursor.fetchmany(limit)
-        cursor.close()
-        res_message = None
-        if res:
-            res = tuple(map(get_permalink_and_save, res))
-            logger.debug("debugging res")
-            logger.debug(res)
-            res_message = "\n".join(
-                [
-                    "*<@%s>* _<!date^%s^{date_pretty} {time}|A while ago>_ _<#%s>_\n%s\n_[Permalink](%s)_\n\n"
-                    % (i[1], int(float(i[2])), i[3], quote_message(i[0]), i[4])
-                    for i in res
-                ]
-            )
-        if res_message:
-            # replace everyone tag breaking everything
-            res_message = res_message.replace("<!everyone>", "everyone")
-            say(res_message)
-        else:
-            say("No results found\n\n"+usage_text)
-    except ValueError as e:
-        logger.error(traceback.format_exc())
-        say(str(e))
-
-def maintenance(msg: str) -> str:
-    if msg == "delete_permalinks":
-        conn, cursor = db_connect(database_path)
-        cursor.execute("update messages set permalink = ''")
-        conn.commit()
-        return "permalinks deleted"
-    return "no maintenance executed"
-
-def inactive(days: str) -> str:
-    try:                
-        days = str(int(days))
-    except:
-        raise ValueError("%s not a valid number" % days)
-
-    conn, cursor = db_connect(database_path)
-    query = "select group_concat(name, ', ') from users where id not in (select distinct user from messages where datetime(timestamp, 'unixepoch') > date('now', ?) order by timestamp desc)";
-    query_args = ['-'+days+' days']
-    cursor.execute(query, query_args)
-    res = cursor.fetchone()
-    if len(res) > 0:
-        return res[0]
-    else:
-        return "Something went wrong"
-
-
-def topusers(days: str) -> str:
-    try:                
-        days = str(int(days))
-    except:
-        raise ValueError("%s not a valid number" % days)
-    
-    conn, cursor = db_connect(database_path)
-    query = f"""    
-    SELECT group_concat(name || ': ' || messaggi || ', rants: ' || rants || ' praises: ' || praises, '\n') FROM (
-        SELECT 
-            users.name,
-            count(*) messaggi, 
-            SUM(IIF(channels.name = "rants", 1, 0)) rants,
-            SUM(IIF(channels.name = "praise", 1, 0)) praises
-        FROM users 
-        INNER JOIN messages 
-            ON users.id = messages.user 
-        INNER JOIN channels 
-            ON channels.id = messages.channel 
-        WHERE 
-            datetime(timestamp, 'unixepoch') > date('now', ?)
-        GROUP BY users.name 
-        ORDER BY count(*) DESC
-    ) AS t1;
-
-            """
-    query_args = ['-'+days+' days']
-    cursor.execute(query, query_args)
-    res = cursor.fetchone()
-    if len(res) > 0:
-        return res[0]
-    else:
-        return "Something went wrong"
-
-def oblivion(msg: str) -> str:
-    if msg != "confirm":
-        return "This command WILL DELETE ALL YOUR POST IN THE DATABASE of the BOT, and it will be impossible to recover them again. If you are sure, repeat the command again using oblivion:confirm"
-    else:
-        conn, cursor = db_connect(database_path)
-        # cursor.execute("update messages set permalink = ''")
-        # conn.commit()
-        return "Chi sei?"
-
-def quote_message(msg: str) -> str:
-    """
-    Prefixes each line with a '>'.
-
-    In makrdown this symbol denotes a quote, so Slack will render the message
-    wrapped in a blockquote tag.
-    """
-    return "> ".join(msg.splitlines(True))
 
 def get_first_reply_in_thread(res):
     # get all ther replies of the message
@@ -393,6 +154,7 @@ def get_first_reply_in_thread(res):
         logger.debug("An error occurred fetching replies: ", e)
 
     return res
+
 
 def get_permalink_and_save(res):
     if res[4] == "":
@@ -546,6 +308,7 @@ def handle_message(message, say):
 
     logger.debug("--------------------------")
 
+
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_message_with_file(event, say):
     logger = logging.getLogger(__name__)
@@ -563,6 +326,7 @@ def handle_message_with_file(event, say):
 
     # Call handle_message with the extracted information
     handle_message(message, say)
+
 
 @app.message("")
 def handle_message_default(message, say):
@@ -583,6 +347,7 @@ def handle_message_changed(event):
         (message["text"], message["user"], event["channel"], message["ts"]),
     )
     conn.commit()
+
 
 @app.event("channel_created")
 def handle_channel_created(event):
@@ -606,8 +371,7 @@ def init():
     except Exception as e:
         logger.error("Error updating users and channels: %s" % e)
         
-
-
+        
 def main():
     init()
 
