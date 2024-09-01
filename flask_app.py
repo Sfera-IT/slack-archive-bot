@@ -751,7 +751,7 @@ def optout_ai():
         if conn:
             conn.close()
 
-    return get_response({'user_id': user, 'opted_out': ret})
+    return get_response({'user_id': user, 'opted_out_ai': ret})
 
 
 @flask_app.route('/getlink', methods=['GET'])
