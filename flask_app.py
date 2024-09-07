@@ -15,6 +15,20 @@ from datetime import timedelta
 import re
 from functools import wraps
 from flask import g, redirect, url_for
+import csv
+from io import StringIO
+
+# Sposta l'array degli amministratori in una variabile globale
+ADMIN_USERS = [
+    'U011PQ7RHRT',
+    'U011MV24J2W',
+    'U0129HFHRJ4',
+    'U011N8WRRD0',
+    'U011Z26G449',
+    'U011CKQ7D71',
+    'U011KE4BF0W',
+    'U011PN35BHT'
+]
 
 def auth_required(f):
     @wraps(f)
@@ -186,6 +200,7 @@ def whoami():
     user = g.user_id
     username = g.username
     opted_out_ai = g.opted_out_ai
+    is_admin = user in ADMIN_USERS
 
     conn = get_db_connection()
     status = conn.execute('SELECT * FROM optout WHERE user = ?', (user,)).fetchone()
@@ -193,12 +208,12 @@ def whoami():
     conn.close()
 
     if status:
-        return get_response({'user_id': user, 'username': username, 'opted_out': True, 'opted_out_ai': opted_out_ai})
-    return get_response({'user_id': user, 'username': username, 'opted_out': False, 'opted_out_ai': opted_out_ai})
+        return get_response({'user_id': user, 'username': username, 'opted_out': True, 'opted_out_ai': opted_out_ai, 'is_admin': is_admin})
+    return get_response({'user_id': user, 'username': username, 'opted_out': False, 'opted_out_ai': opted_out_ai, 'is_admin': is_admin})
 
 
-def notify_users(users, text):
-    for user in users:
+def notify_admins(text):
+    for user in ADMIN_USERS:
         response = app.client.chat_postMessage(
             channel=user,
             text=text
@@ -218,17 +233,7 @@ def optout():
         cursor.execute('UPDATE messages SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?', (user,))
         conn.commit()
 
-        notify_users(
-            [
-                'U011PQ7RHRT',
-                'U011MV24J2W',
-                'U0129HFHRJ4',
-                'U011N8WRRD0',
-                'U011Z26G449',
-                'U011CKQ7D71',
-                'U011KE4BF0W',
-                'U011PN35BHT'
-                ],
+        notify_admins(
             "L'utente <@" + user + "> ha scelto di non essere più archiviato."
         )
 
@@ -988,7 +993,8 @@ def get_stats():
     # Add this new query for inactive users
     inactive_users = conn.execute('''
         SELECT 
-            users.name AS user_name,
+            users.real_name AS real_name,
+            users.display_name AS display_name,
             CAST((julianday('now') - julianday(datetime(MAX(messages.timestamp), 'unixepoch'))) AS INTEGER) AS days_inactive
         FROM users
         LEFT JOIN messages ON users.id = messages.user
@@ -1002,16 +1008,55 @@ def get_stats():
 
     # Add a new query for deleted users
     deleted_users = conn.execute('''
-        SELECT name, id
+        SELECT real_name, display_name, id
         FROM users
         WHERE is_deleted = TRUE
-        ORDER BY name
+        ORDER BY real_name
     ''').fetchall()
     stats['deleted_users'] = [dict(row) for row in deleted_users]
 
     conn.close()
 
     return get_response(stats)
+
+
+@flask_app.route('/download_users', methods=['GET'])
+@auth_required
+@optin_required
+def download_users():
+    user = g.user_id
+    if user not in ADMIN_USERS:
+        return get_response({'error': 'Unauthorized'}), 403
+
+    conn = get_db_connection()
+    users = conn.execute('''
+        SELECT 
+            users.name, 
+            users.id, 
+            users.real_name, 
+            users.display_name, 
+            users.email, 
+            users.is_deleted,
+            CAST((julianday('now') - julianday(datetime(MAX(messages.timestamp), 'unixepoch'))) AS INTEGER) AS days_since_last_activity,
+            COUNT(messages.user) AS total_posts
+        FROM users
+        LEFT JOIN messages ON users.id = messages.user
+        GROUP BY users.id
+        ORDER BY users.name
+    ''').fetchall()
+    conn.close()
+
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Name', 'ID', 'Real Name', 'Display Name', 'Email', 'Is Deleted', 'Days Since Last Activity', 'Total Posts'])
+    for user in users:
+        writer.writerow(user)
+
+    output.seek(0)
+    return get_response({
+        'csv': output.getvalue(),
+        'filename': 'users.csv'
+    })
 
 
 if __name__ == '__main__':

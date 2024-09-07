@@ -172,6 +172,30 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Add real_name, display_name, and email to users
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN real_name TEXT
+            """
+        )
+        cursor.execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN display_name TEXT
+            """
+        )
+        cursor.execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN email TEXT
+            """
+        )
+        conn.commit()
+    except:
+        pass
+
 
 
 def db_connect(database_path):
