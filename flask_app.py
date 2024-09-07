@@ -995,11 +995,19 @@ def get_stats():
         WHERE users.name != 'Slackbot'
         AND users.is_deleted = FALSE
         GROUP BY users.id
-        HAVING days_inactive > 0
+        HAVING days_inactive > 120
         ORDER BY days_inactive DESC
-        LIMIT 20
     ''').fetchall()
     stats['inactive_users'] = [dict(row) for row in inactive_users]
+
+    # Add a new query for deleted users
+    deleted_users = conn.execute('''
+        SELECT name, id
+        FROM users
+        WHERE is_deleted = TRUE
+        ORDER BY name
+    ''').fetchall()
+    stats['deleted_users'] = [dict(row) for row in deleted_users]
 
     conn.close()
 
