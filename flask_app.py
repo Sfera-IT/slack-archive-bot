@@ -874,20 +874,6 @@ def get_stats():
     ''', (f'-{days} days',)).fetchall()
     stats['top_channels'] = [dict(row) for row in top_channels]
 
-    # 3. Thread and post trends per channel
-    channel_trends = conn.execute('''
-        SELECT 
-            channels.name,
-            COUNT(DISTINCT CASE WHEN messages.thread_ts IS NOT NULL THEN messages.thread_ts ELSE messages.timestamp END) as thread_count,
-            COUNT(*) as total_posts
-        FROM messages
-        JOIN channels ON messages.channel = channels.id
-        WHERE datetime(messages.timestamp, 'unixepoch') > datetime('now', ?)
-        GROUP BY channels.id
-        ORDER BY total_posts DESC
-    ''', (f'-{days} days',)).fetchall()
-    stats['channel_trends'] = [dict(row) for row in channel_trends]
-
     # 4. Most active hours
     active_hours = conn.execute('''
         SELECT 
@@ -995,6 +981,21 @@ def get_stats():
         LIMIT 10
     ''', (f'-{days} days',)).fetchall()
     stats['active_users_by_words'] = [dict(row) for row in active_users_by_words]
+
+    # Add this new query for inactive users
+    inactive_users = conn.execute('''
+        SELECT 
+            users.name AS user_name,
+            CAST((julianday('now') - julianday(datetime(MAX(messages.timestamp), 'unixepoch'))) AS INTEGER) AS days_inactive
+        FROM users
+        LEFT JOIN messages ON users.id = messages.user
+        WHERE users.name != 'Slackbot'
+        GROUP BY users.id
+        HAVING days_inactive > 0
+        ORDER BY days_inactive DESC
+        LIMIT 20
+    ''').fetchall()
+    stats['inactive_users'] = [dict(row) for row in inactive_users]
 
     conn.close()
 
