@@ -596,7 +596,7 @@ def generate_digest():
                 Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano.
                 In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
 
-                Dettagli sull’estrazione:
+                Dettagli sull'estrazione:
                 - L'estrazione contiene tutti i messaggi inviati sul workspace, suddivisi in canali e thread. 
                 - Sono inclusi anche i thread più vecchi di 24 ore se hanno ricevuto una risposta nelle ultime 24 ore. 
                             
@@ -609,7 +609,7 @@ def generate_digest():
                 - Inserisci sempre un link alle conversazioni più coinvolgenti di ogni canale, il link è nel formato [link](https://slack-archive.sferait.org/getlink?timestamp=MESSAGE_TIMESTAMP) dove MESSAGE_TIMESTAMP è il valore del timestamp del thread esattamente come riportato.
                 - Evita commenti rispetto alla vivacita o varietà del gruppo, rimani sempre fattuale, parla dei fatti e delle conversazioni avvenute, non giudicarne il contenuto. 
                 - È importante che il digest raccolga tutte le conversazioni delle ultime ore e non ne escluda nessuna.
-                - Ricorda che il nome dell’utente che ha inviato il post o ha avviato la conversazione è sempre PRIMA del messaggio, non dopo
+                - Ricorda che il nome dell'utente che ha inviato il post o ha avviato la conversazione è sempre PRIMA del messaggio, non dopo
 
                 {formatted_messages}"""}
         ],
@@ -851,12 +851,13 @@ def get_stats():
     conn = get_db_connection()
     stats = {}
 
-    # 1. User activity ranking
+    # 1. User activity ranking (excluding deleted users)
     user_activity = conn.execute('''
         SELECT users.name, COUNT(*) as post_count
         FROM messages
         JOIN users ON messages.user = users.id
         WHERE datetime(messages.timestamp, 'unixepoch') > datetime('now', ?)
+        AND users.is_deleted = FALSE
         GROUP BY users.id
         ORDER BY post_count DESC
     ''', (f'-{days} days',)).fetchall()
@@ -952,6 +953,7 @@ def get_stats():
             JOIN channels ON messages.channel = channels.id
             WHERE messages.thread_ts IS NOT NULL
                 AND datetime(messages.thread_ts, 'unixepoch') > datetime('now', ?)
+                AND users.is_deleted = FALSE
             GROUP BY messages.thread_ts
             ORDER BY reply_count DESC
         )
@@ -976,6 +978,7 @@ def get_stats():
         FROM messages
         JOIN users ON messages.user = users.id
         WHERE datetime(messages.timestamp, 'unixepoch') > datetime('now', ?)
+        AND users.is_deleted = FALSE
         GROUP BY users.id
         ORDER BY total_words DESC
         LIMIT 10
@@ -990,6 +993,7 @@ def get_stats():
         FROM users
         LEFT JOIN messages ON users.id = messages.user
         WHERE users.name != 'Slackbot'
+        AND users.is_deleted = FALSE
         GROUP BY users.id
         HAVING days_inactive > 0
         ORDER BY days_inactive DESC
