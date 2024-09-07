@@ -160,6 +160,20 @@ def migrate_db(conn, cursor):
         print(f"Error creating digest_details table: {e}")
         pass
 
+    # Aggiungi is_deleted a users
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE
+            """
+        )
+        conn.commit()
+    except:
+        pass
+
+
+
 def db_connect(database_path):
     conn = sqlite3.connect(database_path)
     cursor = conn.cursor()

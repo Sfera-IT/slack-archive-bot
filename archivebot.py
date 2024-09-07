@@ -68,9 +68,10 @@ def update_users(conn, cursor):
                     "image_72",
                     "http://fst.slack-edge.com/66f9/img/avatars/ava_0024-32.png",
                 ),
+                m.get("deleted", False)
             )
         )
-    cursor.executemany("INSERT INTO users(name, id, avatar) VALUES(?,?,?)", args)
+    cursor.executemany("INSERT OR REPLACE INTO users(name, id, avatar, is_deleted) VALUES(?,?,?,?)", args)
     conn.commit()
 
 
@@ -381,4 +382,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
