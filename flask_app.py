@@ -413,7 +413,7 @@ def search_messages_V2():
         sql += ' AND CAST(messages.timestamp AS FLOAT) <= ?'
         params.append(end_timestamp)
 
-    sql += ' ORDER BY messages.timestamp DESC LIMIT 200'
+    sql += ' ORDER BY messages.timestamp DESC LIMIT 2000'
 
     messages = conn.execute(sql, params).fetchall()
     conn.close()
