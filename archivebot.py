@@ -385,3 +385,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Make sure this function is accessible when imported
+__all__ = ['update_users', 'app']

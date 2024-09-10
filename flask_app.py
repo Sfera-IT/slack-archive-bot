@@ -5,7 +5,7 @@ import requests
 from dotenv import load_dotenv
 import jwt
 from slack_bolt.adapter.flask import SlackRequestHandler
-from archivebot import app
+from archivebot import app, update_users
 handler = SlackRequestHandler(app)
 import datetime
 from sentence_transformers import SentenceTransformer
@@ -854,6 +854,10 @@ def get_stats():
     days = request.args.get('days', 30, type=int)
 
     conn = get_db_connection()
+
+    # update the users table
+    update_users(conn, conn.cursor())
+
     stats = {}
 
     # 1. User activity ranking (excluding deleted users)
@@ -1029,6 +1033,9 @@ def download_users():
         return get_response({'error': 'Unauthorized'}), 403
 
     conn = get_db_connection()
+
+    update_users(conn, conn.cursor())
+
     users = conn.execute('''
         SELECT 
             users.name, 
@@ -1057,6 +1064,7 @@ def download_users():
         'csv': output.getvalue(),
         'filename': 'users.csv'
     })
+
 
 
 if __name__ == '__main__':
