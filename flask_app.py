@@ -256,7 +256,14 @@ def optout():
 @optin_required
 def get_channels():
     conn = get_db_connection()
-    channels = conn.execute('SELECT * FROM channels WHERE is_private = 0 ORDER BY name').fetchall()
+    channels = conn.execute('''
+        SELECT c.*, MAX(m.timestamp) as last_message_timestamp
+        FROM channels c
+        LEFT JOIN messages m ON c.id = m.channel
+        WHERE c.is_private = 0
+        GROUP BY c.id
+        ORDER BY last_message_timestamp DESC, c.name
+    ''').fetchall()
     conn.close()
     return get_response([dict(ix) for ix in channels])
 
