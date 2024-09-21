@@ -526,15 +526,18 @@ def generate_podcast_content(formatted_messages):
     response = client.chat.completions.create(
         model=DEFAULT_OPENAI_MODEL,
         messages=[
-            {"role": "system", "content": "Sei un assistente che crea contenuti per podcast basati su conversazioni di Slack. Il tuo compito è creare un riassunto scorrevole e coinvolgente, adatto all'ascolto."},
+            {"role": "system", "content": "Sei un membro della Community Sfera IT che crea contenuti per podcast basati sulle conversazioni della community. Il tuo compito è creare un riassunto scorrevole e coinvolgente, adatto all'ascolto, come se stessi parlando con altri membri della community."},
             {"role": "user", "content": f"""
-                Crea un podcast basato sulle seguenti conversazioni di Slack. Il podcast deve essere:
-                1. Scorrevole e naturale, come se fosse parlato
-                2. Coinvolgente e interessante da ascoltare
-                3. Strutturato in modo logico, con un'introduzione, corpo principale e conclusione
-                4. Della durata di circa 5-7 minuti quando letto ad un ritmo normale
+                Crea un podcast basato sulle seguenti conversazioni della Community Sfera IT. Il podcast deve:
+                1. Essere scorrevole e naturale, come se stessi chiacchierando con altri membri della community
+                2. Essere coinvolgente e interessante da ascoltare, riferendoti direttamente alla "Community Sfera IT"
+                3. Menzionare i nickname di chi ha avviato le discussioni più interessanti
+                4. Mantenere un tono informale e autentico, come se fossi "uno di noi"
+                5. Raccontare in modo discorsivo e fluido cosa è accaduto nei thread della Community
+                6. Evitare di suonare troppo artificiale o "finto"
+                7. Avere una durata di circa 5-7 minuti quando letto ad un ritmo normale
 
-                Non menzionare esplicitamente che si tratta di conversazioni Slack o di un riassunto. Presenta le informazioni come se fossi un host che racconta gli ultimi sviluppi e discussioni della community.
+                Presenta le informazioni come se fossi un membro della community che racconta gli ultimi sviluppi e discussioni ai suoi amici. Usa espressioni come "nella nostra community", "i nostri membri", "abbiamo discusso di", ecc.
 
                 Ecco le conversazioni:
                 {formatted_messages}
@@ -645,7 +648,7 @@ def generate_digest():
                             
                 Il tuo compito è creare un digest:
                 - La prima parte del digest è un indice: deve contenere un elenco puntato, estremamente conciso ma dettagliato, di TUTTI gli argomenti trattati, TUTTI I THREAD, uno per uno. Per ogni argomento una breve descrizione, chi ha aperto il thread e link al thread (tutto sulla stessa riga)
-                - La seconda parte del Digest è invece discorsiva, rimanendo sempre dettagliata e sui fatti, non essere troppo generico: racconta cosa è successo su ogni canale in maniera descrittiva, enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati (fornendo un buon numero di dettagli), inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. Anche in questo caso, inserisci sempre il link alle conversazioni citate.
+                - La seconda parte del Digest è invece discorsiva, rimanendo sempre dettagliata e sui fatti, non essere troppo generico: racconta cosa è successo su ogni canale in maniera descrittiva, enfatizzando le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati (fornendo un buon numero di dettagli), inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. Anche in questo caso, inserisci sempre il link alle conversazioni citate.
 
                 Altri importanti dettagli:
                 - La risposta deve essere in formato markdown.
