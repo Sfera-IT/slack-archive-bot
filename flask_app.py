@@ -17,6 +17,12 @@ from functools import wraps
 from flask import g, redirect, url_for
 import csv
 from io import StringIO
+import openai
+from pydub import AudioSegment
+import io
+from openai import OpenAI
+from pathlib import Path
+from flask import send_file
 
 # Sposta l'array degli amministratori in una variabile globale
 ADMIN_USERS = [
@@ -29,6 +35,8 @@ ADMIN_USERS = [
     'U011KE4BF0W',
     'U011PN35BHT'
 ]
+
+DEFAULT_OPENAI_MODEL = "gpt-4o-2024-08-06"
 
 def auth_required(f):
     @wraps(f)
@@ -512,6 +520,33 @@ def search_messages_embeddings():
     return get_response(distances)
 
 
+# Aggiungi questa funzione per generare il contenuto del podcast
+def generate_podcast_content(formatted_messages):
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    response = client.chat.completions.create(
+        model=DEFAULT_OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": "Sei un assistente che crea contenuti per podcast basati su conversazioni di Slack. Il tuo compito è creare un riassunto scorrevole e coinvolgente, adatto all'ascolto."},
+            {"role": "user", "content": f"""
+                Crea un podcast basato sulle seguenti conversazioni di Slack. Il podcast deve essere:
+                1. Scorrevole e naturale, come se fosse parlato
+                2. Coinvolgente e interessante da ascoltare
+                3. Strutturato in modo logico, con un'introduzione, corpo principale e conclusione
+                4. Della durata di circa 5-7 minuti quando letto ad un ritmo normale
+
+                Non menzionare esplicitamente che si tratta di conversazioni Slack o di un riassunto. Presenta le informazioni come se fossi un host che racconta gli ultimi sviluppi e discussioni della community.
+
+                Ecco le conversazioni:
+                {formatted_messages}
+            """}
+        ],
+        max_tokens=4096,
+        temperature=0.7,
+    )
+    
+    return response.choices[0].message.content
+
+
 @flask_app.route('/generate_digest', methods=['POST'])
 @auth_required
 @optin_required
@@ -595,13 +630,9 @@ def generate_digest():
     
     
     # Generate summary using OpenAI
-    # model info
-    # gpt-4o as july 2024 has a 4096 token limit
-    # gpt-4o mini has a 16k token limits
-    # in august 2024 gpt-4o-2024-08-06 has been released with 16k token limit
-    openai.api_key = os.getenv('OPENAI_API_KEY')
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-2024-08-06",
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    response = client.chat.completions.create(
+        model=DEFAULT_OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano."},
             {"role": "user", "content": f"""
@@ -625,8 +656,8 @@ def generate_digest():
 
                 {formatted_messages}"""}
         ],
-       # max_tokens=4096,
-       request_timeout=600
+        max_tokens=4096,
+        temperature=0.7,
     )
     
     summary = response.choices[0].message.content
@@ -636,11 +667,26 @@ def generate_digest():
     start_date = end_date - timedelta(days=1)
     period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
 
-    # Insert the digest into the database
+    # Genera il contenuto del podcast
+    podcast_content = generate_podcast_content(formatted_messages)
+
+    # Genera l'audio del podcast
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    speech_file_path = Path("podcast.mp3")
+    response = client.audio.speech.create(
+        model="tts-1",
+        voice="alloy",
+        input=podcast_content
+    )
+
+    # Salva l'audio come file MP3
+    response.stream_to_file(speech_file_path)
+
+    # Inserisci il digest e il contenuto del podcast nel database
     conn.execute('''
-    INSERT INTO digests (timestamp, period, digest, posts)
-    VALUES (?, ?, ?, ?)
-    ''', (datetime.datetime.utcnow().isoformat(), period, summary, formatted_messages))
+    INSERT INTO digests (timestamp, period, digest, posts, podcast_content)
+    VALUES (?, ?, ?, ?, ?)
+    ''', (datetime.datetime.utcnow().isoformat(), period, summary, formatted_messages, podcast_content))
     conn.commit()
     conn.close()
 
@@ -692,9 +738,9 @@ def digest_details():
     digest_timestamp = latest_digest['timestamp']
 
     # Generate details using OpenAI
-    openai.api_key = os.getenv('OPENAI_API_KEY')
-    response = openai.ChatCompletion.create(
-        model="gpt-4o", # gpt-4o non mini per essere più precisi
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    response = client.chat.completions.create(
+        model=DEFAULT_OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "Sei un assistente che fornisce dettagli sulle conversazioni di un workspace Slack in base a specifiche richieste."},
             {"role": "user", "content": f"""Dati i seguenti post originali, fornisci dettagli specifici in risposta alla query dell'utente. 
@@ -708,7 +754,7 @@ def digest_details():
             Fornisci una risposta dettagliata, in italiano e in formato markdown."""}
         ],
         max_tokens=4096,
-        request_timeout=300
+        temperature=0.7,
     )
     
     details = response.choices[0].message.content
@@ -831,18 +877,18 @@ def chat():
     prompt = f"Context:\n{context_text}\n\nConversation:\n{conversation_text}\n\nUser: {message}\nAI:"
 
     # Call OpenAI
-    openai.api_key = os.getenv('OPENAI_API_KEY')
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-2024-08-06",
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    response = client.chat.completions.create(
+        model=DEFAULT_OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "Sei un assistente che risponde alle domande relative alle conversazioni di un workspace di Slack. Ti verranno passate delle conversazioni e una serie di domande a cui dovrai rispondere con precisione."},
             {"role": "user", "content": prompt}
         ],
         max_tokens=4096,
-        request_timeout=600
+        temperature=0.7,
     )
 
-    ai_response = response.choices[0].message['content'].strip()
+    ai_response = response.choices[0].message.content.strip()
     conversation.append({
         'user_name': 'AI',
         'message': ai_response,
@@ -1072,6 +1118,33 @@ def download_users():
         'filename': 'users.csv'
     })
 
+
+@flask_app.route('/get_podcast_content', methods=['GET'])
+@auth_required
+@optin_required
+def get_podcast_content():
+    conn = get_db_connection()
+    latest_digest = conn.execute('''
+    SELECT podcast_content FROM digests
+    ORDER BY timestamp DESC
+    LIMIT 1
+    ''').fetchone()
+    conn.close()
+
+    if latest_digest:
+        return get_response({'podcast_content': latest_digest['podcast_content']})
+    else:
+        return get_response({'error': 'No podcast content available'}), 404
+
+
+@flask_app.route('/get_podcast_audio', methods=['GET'])
+@auth_required
+@optin_required
+def get_podcast_audio():
+    try:
+        return send_file("podcast.mp3", mimetype="audio/mpeg", as_attachment=True)
+    except FileNotFoundError:
+        return jsonify({'error': 'Podcast audio not found'}), 404
 
 
 if __name__ == '__main__':
