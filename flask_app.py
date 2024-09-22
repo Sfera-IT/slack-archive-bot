@@ -17,6 +17,12 @@ from functools import wraps
 from flask import g, redirect, url_for
 import csv
 from io import StringIO
+import openai
+from pydub import AudioSegment
+import io
+from openai import OpenAI
+from pathlib import Path
+from flask import send_file
 
 # Sposta l'array degli amministratori in una variabile globale
 ADMIN_USERS = [
@@ -29,6 +35,8 @@ ADMIN_USERS = [
     'U011KE4BF0W',
     'U011PN35BHT'
 ]
+
+DEFAULT_OPENAI_MODEL = "gpt-4o-2024-08-06"
 
 def auth_required(f):
     @wraps(f)
@@ -511,6 +519,67 @@ def search_messages_embeddings():
 
     return get_response(distances)
 
+def generate_podcast_audio(podcast_content):
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    max_length = 4000  # Lasciamo un po' di margine
+    segments = [podcast_content[i:i+max_length] for i in range(0, len(podcast_content), max_length)]
+    
+    audio_segments = []
+    for segment in segments:
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=segment
+        )
+        
+        # Salva il segmento audio temporaneamente
+        temp_file = f"temp_segment_{len(audio_segments)}.mp3"
+        response.stream_to_file(temp_file)
+        
+        # Carica il segmento audio e aggiungilo alla lista
+        audio_segments.append(AudioSegment.from_mp3(temp_file))
+        
+        # Rimuovi il file temporaneo
+        os.remove(temp_file)
+    
+    # Unisci tutti i segmenti audio
+    combined_audio = sum(audio_segments)
+    
+    # Salva l'audio combinato
+    combined_audio.export("podcast.mp3", format="mp3")
+
+# Aggiungi questa funzione per generare il contenuto del podcast
+def generate_podcast_content(formatted_messages):
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    response = client.chat.completions.create(
+        model=DEFAULT_OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": "Sei un membro della Community Sfera IT che crea contenuti per podcast basati sulle conversazioni della community. Il tuo compito è creare un riassunto scorrevole e coinvolgente, adatto all'ascolto, come se stessi parlando con altri membri della community."},
+            {"role": "user", "content": f"""
+                Crea un podcast basato sulle seguenti conversazioni della Community Sfera IT. Il podcast deve:
+                1. Essere scorrevole e naturale, come se stessi chiacchierando con altri membri della community
+                2. Essere coinvolgente e interessante da ascoltare, riferendoti direttamente alla "Community Sfera IT"
+                3. Menzionare i nickname di chi ha avviato le discussioni più interessanti
+                4. Mantenere un tono informale e autentico, come se fossi "uno di noi"
+                5. Raccontare in modo discorsivo e fluido cosa è accaduto nei thread della Community
+                6. Evitare di suonare troppo artificiale o "finto"
+                7. Avere una durata di circa 10 minuti quando letto ad un ritmo normale, indicativamente 1500 parole
+
+                Presenta le informazioni come se fossi un membro della community che racconta gli ultimi sviluppi e discussioni ai suoi amici. Usa espressioni come "nella nostra community", "i nostri membri", "abbiamo discusso di", ecc.
+                Dividi il podcast in 2 sezioni:
+                    - una prima sezione in cui fai una carrellata veloce degli argomenti che sono stati trattati in tutti i thread, cercando di non perderti argomenti o thread importanti
+                    - una seconda sezione in cui fai un discorso più approfondito sui thread più coinvolgenti, mostrando i dettagli più importanti e significativi, evidenziando le conversazioni più intense e coinvolgenti
+
+                Ecco le conversazioni:
+                {formatted_messages}
+            """}
+        ],
+        max_tokens=8192,
+        temperature=1.0,
+    )
+    
+    return response.choices[0].message.content
+
 
 @flask_app.route('/generate_digest', methods=['POST'])
 @auth_required
@@ -595,13 +664,9 @@ def generate_digest():
     
     
     # Generate summary using OpenAI
-    # model info
-    # gpt-4o as july 2024 has a 4096 token limit
-    # gpt-4o mini has a 16k token limits
-    # in august 2024 gpt-4o-2024-08-06 has been released with 16k token limit
-    openai.api_key = os.getenv('OPENAI_API_KEY')
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-2024-08-06",
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    response = client.chat.completions.create(
+        model=DEFAULT_OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano."},
             {"role": "user", "content": f"""
@@ -614,7 +679,7 @@ def generate_digest():
                             
                 Il tuo compito è creare un digest:
                 - La prima parte del digest è un indice: deve contenere un elenco puntato, estremamente conciso ma dettagliato, di TUTTI gli argomenti trattati, TUTTI I THREAD, uno per uno. Per ogni argomento una breve descrizione, chi ha aperto il thread e link al thread (tutto sulla stessa riga)
-                - La seconda parte del Digest è invece discorsiva, rimanendo sempre dettagliata e sui fatti, non essere troppo generico: racconta cosa è successo su ogni canale in maniera descrittiva, enfatizza le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati (fornendo un buon numero di dettagli), inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. Anche in questo caso, inserisci sempre il link alle conversazioni citate.
+                - La seconda parte del Digest è invece discorsiva, rimanendo sempre dettagliata e sui fatti, non essere troppo generico: racconta cosa è successo su ogni canale in maniera descrittiva, enfatizzando le conversazioni più coinvolgenti e partecipate se ci sono state, gli argomenti trattati (fornendo un buon numero di dettagli), inclusi i nomi dei partecipanti alle varie conversazioni, evidenziati. Anche in questo caso, inserisci sempre il link alle conversazioni citate.
 
                 Altri importanti dettagli:
                 - La risposta deve essere in formato markdown.
@@ -625,8 +690,8 @@ def generate_digest():
 
                 {formatted_messages}"""}
         ],
-       # max_tokens=4096,
-       request_timeout=600
+        max_tokens=4096,
+        temperature=0.7,
     )
     
     summary = response.choices[0].message.content
@@ -636,11 +701,17 @@ def generate_digest():
     start_date = end_date - timedelta(days=1)
     period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
 
-    # Insert the digest into the database
+    # Genera il contenuto del podcast
+    podcast_content = generate_podcast_content(formatted_messages)
+
+    # Genera l'audio del podcast utilizzando la nuova funzione
+    generate_podcast_audio(podcast_content)
+
+    # Inserisci il digest e il contenuto del podcast nel database
     conn.execute('''
-    INSERT INTO digests (timestamp, period, digest, posts)
-    VALUES (?, ?, ?, ?)
-    ''', (datetime.datetime.utcnow().isoformat(), period, summary, formatted_messages))
+    INSERT INTO digests (timestamp, period, digest, posts, podcast_content)
+    VALUES (?, ?, ?, ?, ?)
+    ''', (datetime.datetime.utcnow().isoformat(), period, summary, formatted_messages, podcast_content))
     conn.commit()
     conn.close()
 
@@ -692,9 +763,9 @@ def digest_details():
     digest_timestamp = latest_digest['timestamp']
 
     # Generate details using OpenAI
-    openai.api_key = os.getenv('OPENAI_API_KEY')
-    response = openai.ChatCompletion.create(
-        model="gpt-4o", # gpt-4o non mini per essere più precisi
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    response = client.chat.completions.create(
+        model=DEFAULT_OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "Sei un assistente che fornisce dettagli sulle conversazioni di un workspace Slack in base a specifiche richieste."},
             {"role": "user", "content": f"""Dati i seguenti post originali, fornisci dettagli specifici in risposta alla query dell'utente. 
@@ -708,7 +779,7 @@ def digest_details():
             Fornisci una risposta dettagliata, in italiano e in formato markdown."""}
         ],
         max_tokens=4096,
-        request_timeout=300
+        temperature=0.7,
     )
     
     details = response.choices[0].message.content
@@ -831,18 +902,18 @@ def chat():
     prompt = f"Context:\n{context_text}\n\nConversation:\n{conversation_text}\n\nUser: {message}\nAI:"
 
     # Call OpenAI
-    openai.api_key = os.getenv('OPENAI_API_KEY')
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-2024-08-06",
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    response = client.chat.completions.create(
+        model=DEFAULT_OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "Sei un assistente che risponde alle domande relative alle conversazioni di un workspace di Slack. Ti verranno passate delle conversazioni e una serie di domande a cui dovrai rispondere con precisione."},
             {"role": "user", "content": prompt}
         ],
         max_tokens=4096,
-        request_timeout=600
+        temperature=0.7,
     )
 
-    ai_response = response.choices[0].message['content'].strip()
+    ai_response = response.choices[0].message.content.strip()
     conversation.append({
         'user_name': 'AI',
         'message': ai_response,
@@ -1072,6 +1143,33 @@ def download_users():
         'filename': 'users.csv'
     })
 
+
+@flask_app.route('/get_podcast_content', methods=['GET'])
+@auth_required
+@optin_required
+def get_podcast_content():
+    conn = get_db_connection()
+    latest_digest = conn.execute('''
+    SELECT podcast_content FROM digests
+    ORDER BY timestamp DESC
+    LIMIT 1
+    ''').fetchone()
+    conn.close()
+
+    if latest_digest:
+        return get_response({'podcast_content': latest_digest['podcast_content']})
+    else:
+        return get_response({'error': 'No podcast content available'}), 404
+
+
+@flask_app.route('/get_podcast_audio', methods=['GET'])
+@auth_required
+@optin_required
+def get_podcast_audio():
+    try:
+        return send_file("podcast.mp3", mimetype="audio/mpeg", as_attachment=True)
+    except FileNotFoundError:
+        return jsonify({'error': 'Podcast audio not found'}), 404
 
 
 if __name__ == '__main__':

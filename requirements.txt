@@ -1,6 +1,6 @@
 Flask==2.0.2
 gunicorn==20.1.0
-slack-bolt==1.2.1 
+slack-bolt==1.18.0
 werkzeug==2.2.2
 blinker==1.8.2
 certifi==2024.6.2
@@ -13,13 +13,14 @@ itsdangerous==2.2.0
 Jinja2==3.1.4
 MarkupSafe==2.1.5
 pycparser==2.22
-PyJWT==2.8.0
-python-dotenv==1.0.1
+PyJWT==2.6.0
+python-dotenv==1.0.0
 requests==2.32.3
 urllib3==2.2.2
 watchdog==4.0.1
 torch==2.3.1
-sentence-transformers==3.0.1
+sentence-transformers==2.2.2
 numpy==1.26.4
-openai==0.27.2
+openai==1.47.0
 timedelta==2020.12.3
+pydub==0.25.1

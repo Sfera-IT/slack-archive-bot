@@ -196,6 +196,16 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Aggiungi la colonna podcast_content alla tabella digests
+    try:
+        cursor.execute('''
+        ALTER TABLE digests
+        ADD COLUMN podcast_content TEXT
+        ''')
+        conn.commit()
+    except:
+        pass
+
 
 
 def db_connect(database_path):
