@@ -4,7 +4,7 @@ FROM python:3.9 AS build
 WORKDIR /usr/src/app
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y gcc musl-dev libffi-dev ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y gcc musl-dev libffi-dev && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 # remove cuda stuff for size optimization
@@ -17,9 +17,11 @@ FROM python:3.9-slim AS final
 
 WORKDIR /usr/src/app
 
-# Copia ffmpeg dalla fase di build
-COPY --from=build /usr/bin/ffmpeg /usr/bin/ffmpeg
-COPY --from=build /usr/bin/ffprobe /usr/bin/ffprobe
+# Installa ffmpeg direttamente nella fase finale
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /usr/src/app /usr/src/app
 COPY --from=build /usr/local/lib/python3.9/site-packages /usr/local/lib/python3.9/site-packages
