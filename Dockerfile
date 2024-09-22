@@ -17,6 +17,10 @@ FROM python:3.9-slim AS final
 
 WORKDIR /usr/src/app
 
+# Copia ffmpeg dalla fase di build
+COPY --from=build /usr/bin/ffmpeg /usr/bin/ffmpeg
+COPY --from=build /usr/bin/ffprobe /usr/bin/ffprobe
+
 COPY --from=build /usr/src/app /usr/src/app
 COPY --from=build /usr/local/lib/python3.9/site-packages /usr/local/lib/python3.9/site-packages
 COPY --from=build /usr/local/bin/gunicorn /usr/local/bin/gunicorn
