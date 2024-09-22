@@ -519,6 +519,34 @@ def search_messages_embeddings():
 
     return get_response(distances)
 
+def generate_podcast_audio(podcast_content):
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    max_length = 4000  # Lasciamo un po' di margine
+    segments = [podcast_content[i:i+max_length] for i in range(0, len(podcast_content), max_length)]
+    
+    audio_segments = []
+    for segment in segments:
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=segment
+        )
+        
+        # Salva il segmento audio temporaneamente
+        temp_file = f"temp_segment_{len(audio_segments)}.mp3"
+        response.stream_to_file(temp_file)
+        
+        # Carica il segmento audio e aggiungilo alla lista
+        audio_segments.append(AudioSegment.from_mp3(temp_file))
+        
+        # Rimuovi il file temporaneo
+        os.remove(temp_file)
+    
+    # Unisci tutti i segmenti audio
+    combined_audio = sum(audio_segments)
+    
+    # Salva l'audio combinato
+    combined_audio.export("podcast.mp3", format="mp3")
 
 # Aggiungi questa funzione per generare il contenuto del podcast
 def generate_podcast_content(formatted_messages):
@@ -535,16 +563,19 @@ def generate_podcast_content(formatted_messages):
                 4. Mantenere un tono informale e autentico, come se fossi "uno di noi"
                 5. Raccontare in modo discorsivo e fluido cosa è accaduto nei thread della Community
                 6. Evitare di suonare troppo artificiale o "finto"
-                7. Avere una durata di circa 5-7 minuti quando letto ad un ritmo normale
+                7. Avere una durata di circa 10 minuti quando letto ad un ritmo normale, indicativamente 1500 parole
 
                 Presenta le informazioni come se fossi un membro della community che racconta gli ultimi sviluppi e discussioni ai suoi amici. Usa espressioni come "nella nostra community", "i nostri membri", "abbiamo discusso di", ecc.
+                Dividi il podcast in 2 sezioni:
+                    - una prima sezione in cui fai una carrellata veloce degli argomenti che sono stati trattati in tutti i thread, cercando di non perderti argomenti o thread importanti
+                    - una seconda sezione in cui fai un discorso più approfondito sui thread più coinvolgenti, mostrando i dettagli più importanti e significativi, evidenziando le conversazioni più intense e coinvolgenti
 
                 Ecco le conversazioni:
                 {formatted_messages}
             """}
         ],
-        max_tokens=4096,
-        temperature=0.7,
+        max_tokens=8192,
+        temperature=1.0,
     )
     
     return response.choices[0].message.content
@@ -673,17 +704,8 @@ def generate_digest():
     # Genera il contenuto del podcast
     podcast_content = generate_podcast_content(formatted_messages)
 
-    # Genera l'audio del podcast
-    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-    speech_file_path = Path("podcast.mp3")
-    response = client.audio.speech.create(
-        model="tts-1",
-        voice="alloy",
-        input=podcast_content
-    )
-
-    # Salva l'audio come file MP3
-    response.stream_to_file(speech_file_path)
+    # Genera l'audio del podcast utilizzando la nuova funzione
+    generate_podcast_audio(podcast_content)
 
     # Inserisci il digest e il contenuto del podcast nel database
     conn.execute('''
