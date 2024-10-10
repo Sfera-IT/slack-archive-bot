@@ -560,15 +560,15 @@ def generate_podcast_content(formatted_messages):
                 1. Essere scorrevole e naturale, come se stessi chiacchierando con altri membri della community
                 2. Essere coinvolgente e interessante da ascoltare, riferendoti direttamente alla "Community Sfera IT"
                 3. Menzionare i nickname di chi ha avviato le discussioni più interessanti
-                4. Mantenere un tono informale e autentico, come se fossi "uno di noi"
+                4. Mantenere un tono informale e autentico, come se fossi "uno di noi", ma non esagerare con lo small talk, concentrati sugli argomenti e sulle conversazioni
                 5. Raccontare in modo discorsivo e fluido cosa è accaduto nei thread della Community
                 6. Evitare di suonare troppo artificiale o "finto"
                 7. Avere una durata di circa 10 minuti quando letto ad un ritmo normale, indicativamente 1500 parole
 
                 Presenta le informazioni come se fossi un membro della community che racconta gli ultimi sviluppi e discussioni ai suoi amici. Usa espressioni come "nella nostra community", "i nostri membri", "abbiamo discusso di", ecc.
                 Dividi il podcast in 2 sezioni:
-                    - una prima sezione in cui fai una carrellata veloce degli argomenti che sono stati trattati in tutti i thread, cercando di non perderti argomenti o thread importanti
-                    - una seconda sezione in cui fai un discorso più approfondito sui thread più coinvolgenti, mostrando i dettagli più importanti e significativi, evidenziando le conversazioni più intense e coinvolgenti
+                    - una prima sezione in cui fai una carrellata veloce degli argomenti che sono stati trattati in tutti i thread, cercando di coprire il maggior numero di thread e argomenti, condensando il più possibile le tematiche con parole sistetiche e concise, con poco intercalare
+                    - una seconda sezione in cui fai un discorso più approfondito sui 2-3 thread più coinvolgenti tra quelli trattati nella prima sezione, mostrando i dettagli più importanti e significativi, evidenziando le conversazioni più intense e coinvolgenti
 
                 Ecco le conversazioni:
                 {formatted_messages}
