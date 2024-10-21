@@ -24,3 +24,4 @@ numpy==1.26.4
 openai==1.47.0
 timedelta==2020.12.3
 pydub==0.25.1
+huggingface_hub==0.24.7
