@@ -690,7 +690,7 @@ def generate_digest():
 
                 {formatted_messages}"""}
         ],
-        max_tokens=4096,
+        max_tokens=16384,
         temperature=0.7,
     )
     
