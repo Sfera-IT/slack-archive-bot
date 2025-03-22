@@ -12,7 +12,7 @@ on:
     branches: [ master ]
 
 env:
-  PYTHON_VERSION: 3.10 # Change on need.
+  PYTHON_VERSION: 3.13 # Change on need.
   REGISTRY: ghcr.io
   # github.repository as <account>/<repo>
   IMAGE_NAME: ${{ github.repository }}
