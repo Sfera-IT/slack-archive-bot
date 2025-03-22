@@ -23,6 +23,7 @@ COPY . .
 # Fase 2: Esecuzione
 ARG PY_BUILD_VERS
 FROM python:${PY_BUILD_VERS}-slim AS final
+ENV PY_BUILD_VERS=${PY_BUILD_VERS}
 
 WORKDIR /usr/src/app
 
