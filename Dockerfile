@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
     libffi-dev \
     cmake \
     pkg-config && \
-`    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 # remove cuda stuff for size optimization
