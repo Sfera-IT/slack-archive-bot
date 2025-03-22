@@ -1,6 +1,5 @@
 # Fase 1: Costruzione
-ARG PY_BUILD_VERS=3.10
-
+ARG PY_BUILD_VERS
 FROM python:${PY_BUILD_VERS} AS build
 
 WORKDIR /usr/src/app
@@ -21,9 +20,9 @@ RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://dow
 COPY . .
 
 # Fase 2: Esecuzione
-ARG PY_BUILD_VERS=3.10
+ARG PY_BUILD_VERS
 FROM python:${PY_BUILD_VERS}-slim AS final
-ENV PY_BUILD_VERS=${PY_BUILD_VERS}
+ARG PY_BUILD_VERS
 
 WORKDIR /usr/src/app
 
