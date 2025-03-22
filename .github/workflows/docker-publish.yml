@@ -12,6 +12,7 @@ on:
     branches: [ master ]
 
 env:
+  PYTHON_VERSION: 3.13 # Change on need.
   REGISTRY: ghcr.io
   # github.repository as <account>/<repo>
   IMAGE_NAME: ${{ github.repository }}
@@ -66,3 +67,5 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
