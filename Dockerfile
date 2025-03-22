@@ -41,4 +41,4 @@ ENV ARCHIVE_BOT_LOG_LEVEL=$LOG_LEVEL
 
 EXPOSE $PORT
 
-CMD exec gunicorn flask_app:flask_app -c gunicorn_conf.py
+CMD ["exec", "gunicorn", "flask_app:flask_app", "-c", "gunicorn_conf.py"]
