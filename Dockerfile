@@ -1,7 +1,7 @@
 # Fase 1: Costruzione
 ARG PY_BUILD_VERS
 
-FROM python:${PYTHON_VERSION} AS build
+FROM python:${PY_BUILD_VERS} AS build
 
 WORKDIR /usr/src/app
 
