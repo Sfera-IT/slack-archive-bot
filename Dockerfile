@@ -1,5 +1,7 @@
 # Fase 1: Costruzione
 ARG PYTHON_VERSION=3.9
+ENV PYTHON_VERSION=$PYTHON_VERSION
+
 FROM python:$PYTHON_VERSION AS build
 
 WORKDIR /usr/src/app
@@ -14,7 +16,6 @@ RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://dow
 COPY . .
 
 # Fase 2: Esecuzione
-ARG PYTHON_VERSION=3.9
 FROM python:${PYTHON_VERSION}-slim AS final
 
 WORKDIR /usr/src/app
@@ -26,7 +27,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /usr/src/app /usr/src/app
-COPY --from=build /usr/local/lib/python3.9/site-packages /usr/local/lib/python3.9/site-packages
+COPY --from=build /usr/local/lib/python${PYTHON_VERSION}/site-packages /usr/local/lib/python${PYTHON_VERSION}/site-packages
 COPY --from=build /usr/local/bin/gunicorn /usr/local/bin/gunicorn
 
 VOLUME /data
