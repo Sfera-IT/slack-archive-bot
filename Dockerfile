@@ -1,5 +1,6 @@
 # Fase 1: Costruzione
-FROM python:3.9 AS build
+ARG PYTHON_VERSION=3.9
+FROM python:$PYTHON_VERSION AS build
 
 WORKDIR /usr/src/app
 
@@ -13,7 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://dow
 COPY . .
 
 # Fase 2: Esecuzione
-FROM python:3.9-slim AS final
+ARG PYTHON_VERSION=3.9
+FROM python:${PYTHON_VERSION}-slim AS final
 
 WORKDIR /usr/src/app
 
