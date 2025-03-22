@@ -6,7 +6,13 @@ FROM python:$PYTHON_VERSION AS build
 WORKDIR /usr/src/app
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y gcc musl-dev libffi-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    gcc \
+    musl-dev \
+    libffi-dev \
+    cmake \
+    pkg-config && \
+`    rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 # remove cuda stuff for size optimization
