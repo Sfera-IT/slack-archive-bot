@@ -1,6 +1,5 @@
 # Fase 1: Costruzione
-ARG PYTHON_VERSION=3.9
-ENV PYTHON_VERSION=$PYTHON_VERSION
+ARG PYTHON_VERSION
 
 FROM python:$PYTHON_VERSION AS build
 
@@ -16,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://dow
 COPY . .
 
 # Fase 2: Esecuzione
+ARG PYTHON_VERSION
 FROM python:${PYTHON_VERSION}-slim AS final
 
 WORKDIR /usr/src/app
