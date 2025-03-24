@@ -1,8 +1,7 @@
-export
-**.sqlite
-**.pyc
-/README_LOCAL_TESTING.md
-/.vscode
-/.venv
-/.idea
-/.DS_Store
+/nbproject/
+/.idea/*
+*.tmlanguage.cache
+*.tmPreferences.cache
+*.stTheme.cache
+*.sublime-workspace
+*.sublime-project
