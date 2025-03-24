@@ -23,5 +23,5 @@ slack-bolt==1.18.0
 timedelta==2020.12.3
 torch==2.6.0
 urllib3==2.2.2
-watchdog==4.0.1
+watchdog==4.0.2
 werkzeug==3.1.3
