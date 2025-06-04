@@ -22,7 +22,7 @@ requests==2.32.4
 sentence-transformers==2.2.2
 slack-bolt==1.18.0
 timedelta==2020.12.3
-torch==2.6.0
+torch==2.7.1
 urllib3==2.2.2
 watchdog==4.0.1
 werkzeug==3.1.3
