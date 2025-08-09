@@ -12,7 +12,7 @@ itsdangerous==2.2.0
 Jinja2==3.1.6
 MarkupSafe==3.0.2
 numpy==1.26.4
-openai==1.47.0
+openai==1.99.6
 pycparser==2.22
 pydub==0.25.1
 PyJWT==2.10.1
