@@ -61,6 +61,8 @@ def auth_required(f):
 def optin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        if g.user_id in ADMIN_USERS:
+            return f(*args, **kwargs)
         if check_optout(g.user_id):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
