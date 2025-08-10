@@ -36,7 +36,7 @@ ADMIN_USERS = [
     'U011PN35BHT'
 ]
 
-DEFAULT_OPENAI_MODEL = "gpt-4o-2024-08-06"
+DEFAULT_OPENAI_MODEL = "gpt-4o"
 
 def auth_required(f):
     @wraps(f)

@@ -7,6 +7,7 @@ cryptography==44.0.2
 Flask==3.1.1
 gunicorn==23.0.0
 huggingface_hub==0.24.7
+httpx==0.25.2
 idna==3.7
 itsdangerous==2.2.0
 Jinja2==3.1.6
