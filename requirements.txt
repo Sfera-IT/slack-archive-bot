@@ -19,7 +19,7 @@ pydub==0.25.1
 PyJWT==2.10.1
 python-dotenv==1.0.0
 requests==2.32.4
-sentence-transformers==2.2.2
+sentence-transformers==2.7.0
 slack-bolt==1.18.0
 timedelta==2020.12.3
 torch==2.6.0
