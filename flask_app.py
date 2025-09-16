@@ -1099,6 +1099,21 @@ def get_stats():
     ''').fetchall()
     stats['deleted_users'] = [dict(row) for row in deleted_users]
 
+    # Posts and replies by channel
+    posts_replies_by_channel = conn.execute('''
+        SELECT 
+            channels.name as channel_name,
+            COUNT(CASE WHEN messages.thread_ts = messages.timestamp THEN 1 END) as post_count,
+            COUNT(CASE WHEN messages.thread_ts != messages.timestamp THEN 1 END) as reply_count,
+            COUNT(*) as total_messages
+        FROM messages
+        JOIN channels ON messages.channel = channels.id
+        WHERE datetime(messages.timestamp, 'unixepoch') > datetime('now', ?)
+        GROUP BY channels.id, channels.name
+        ORDER BY total_messages DESC
+    ''', (f'-{days} days',)).fetchall()
+    stats['posts_replies_by_channel'] = [dict(row) for row in posts_replies_by_channel]
+
     conn.close()
 
     return get_response(stats)
