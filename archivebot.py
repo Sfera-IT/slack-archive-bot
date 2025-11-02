@@ -264,6 +264,7 @@ def check_and_store_links(message, permalink_dict, say):
             normalized_url = normalize_url(original_url)
             
             # Controlla se esiste già un link normalizzato simile negli ultimi 30 giorni
+            # Escludi il messaggio corrente dalla ricerca per evitare di trovare il link appena salvato
             thirty_days_ago = datetime.now() - timedelta(days=30)
             cursor.execute(
                 """
@@ -271,10 +272,11 @@ def check_and_store_links(message, permalink_dict, say):
                 FROM posted_links 
                 WHERE normalized_url = ? 
                 AND posted_date >= ?
+                AND message_timestamp != ?
                 ORDER BY posted_date DESC
                 LIMIT 1
                 """,
-                (normalized_url, thirty_days_ago.isoformat())
+                (normalized_url, thirty_days_ago.isoformat(), message.get("ts", ""))
             )
             
             existing_link = cursor.fetchone()
@@ -297,6 +299,7 @@ def check_and_store_links(message, permalink_dict, say):
                     logger.error(f"Error sending duplicate link notification: {e}")
             
             # Salva il link nella tabella (anche se è duplicato, vogliamo tracciarlo)
+            # Controlla prima se non è già stato salvato per evitare duplicati nello stesso messaggio
             try:
                 timestamp = float(message.get("ts", 0))
                 posted_date = datetime.fromtimestamp(timestamp).isoformat()
