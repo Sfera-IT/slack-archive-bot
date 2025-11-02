@@ -425,6 +425,10 @@ def handle_message(message, say):
         else:
             permalink = {'permalink': ''}
 
+        # Save original message data before opt-out check
+        original_text = message.get("text", "")
+        original_user = message.get("user", "")
+        
         # Check if user opted out
         cursor.execute("SELECT user, timestamp FROM optout WHERE user = ?", (message["user"],))
         row = cursor.fetchone()
@@ -450,8 +454,12 @@ def handle_message(message, say):
         conn.commit()
         conn.close()
 
-        # Check for duplicate links and respond if found
-        check_and_store_links(message, permalink, say)
+        # Check for duplicate links and respond if found (using original message data)
+        # Create a copy of the message with original data for link checking
+        original_message = message.copy()
+        original_message["text"] = original_text
+        original_message["user"] = original_user
+        check_and_store_links(original_message, permalink, say)
 
         # Ensure that the user exists in the DB
         conn, cursor = db_connect(database_path)
