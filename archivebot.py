@@ -5,6 +5,9 @@ import traceback
 import shlex
 from sentence_transformers import SentenceTransformer
 import numpy as np
+import re
+from urllib.parse import urlparse, urlunparse
+from datetime import datetime, timedelta
 
 from slack_bolt import App
 
@@ -183,6 +186,148 @@ def get_permalink_and_save(res):
     return res
 
 
+def extract_urls(text):
+    """Estrae tutti gli URL HTTP/HTTPS da un testo."""
+    # Pattern per rilevare URL http/https
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    urls = re.findall(url_pattern, text)
+    # Rimuovi eventuali caratteri di punteggiatura alla fine dell'URL
+    cleaned_urls = []
+    for url in urls:
+        # Rimuovi caratteri di punteggiatura comuni alla fine
+        url = url.rstrip('.,;:!?')
+        cleaned_urls.append(url)
+    return cleaned_urls
+
+
+def normalize_url(url):
+    """Normalizza un URL rimuovendo parametri query, fragment e trailing slash."""
+    try:
+        parsed = urlparse(url)
+        
+        # Normalizza il netloc (dominio) in minuscolo
+        normalized_netloc = parsed.netloc.lower()
+        
+        # Normalizza il path rimuovendo il trailing slash (tranne per root)
+        normalized_path = parsed.path.rstrip('/') if parsed.path != '/' else '/'
+        
+        # Costruisci l'URL normalizzato senza query e fragment
+        normalized = urlunparse((
+            parsed.scheme.lower(),
+            normalized_netloc,
+            normalized_path,
+            parsed.params,
+            '',  # Query rimossa
+            ''   # Fragment rimosso
+        ))
+        
+        return normalized
+    except Exception as e:
+        logger.warning(f"Error normalizing URL {url}: {e}")
+        return url
+
+
+def check_and_store_links(message, permalink_dict, say):
+    """Controlla se ci sono link nel messaggio e verifica duplicati."""
+    text = message.get("text", "")
+    if not text:
+        return
+    
+    urls = extract_urls(text)
+    if not urls:
+        return
+    
+    conn, cursor = db_connect(database_path)
+    
+    try:
+        # Ottieni il permalink del messaggio corrente
+        current_permalink = permalink_dict.get("permalink", "")
+        # Se non c'è permalink, prova a ottenerlo
+        if not current_permalink and message.get("ts"):
+            try:
+                current_permalink = app.client.chat_getPermalink(
+                    channel=message["channel"], 
+                    message_ts=message["ts"]
+                )["permalink"]
+            except Exception as e:
+                logger.warning(f"Could not get permalink for message: {e}")
+        
+        # Ottieni il nome utente per la risposta
+        user_name = message.get("user", "")
+        try:
+            user_info = app.client.users_info(user=user_name)
+            user_display_name = user_info["user"]["profile"].get("display_name") or user_info["user"]["profile"].get("real_name", "utente")
+        except:
+            user_display_name = "utente"
+        
+        for original_url in urls:
+            normalized_url = normalize_url(original_url)
+            
+            # Controlla se esiste già un link normalizzato simile negli ultimi 30 giorni
+            thirty_days_ago = datetime.now() - timedelta(days=30)
+            cursor.execute(
+                """
+                SELECT normalized_url, permalink, posted_date 
+                FROM posted_links 
+                WHERE normalized_url = ? 
+                AND posted_date >= ?
+                ORDER BY posted_date DESC
+                LIMIT 1
+                """,
+                (normalized_url, thirty_days_ago.isoformat())
+            )
+            
+            existing_link = cursor.fetchone()
+            
+            if existing_link:
+                # Link duplicato trovato, rispondi al messaggio
+                # existing_link è una tuple: (normalized_url, permalink, posted_date)
+                original_permalink = existing_link[1] if len(existing_link) > 1 else ""
+                response_text = f"Ciao {user_display_name}, questo link è stato già postato e lo trovi qui: {original_permalink}"
+                
+                try:
+                    # Rispondi nel thread se il messaggio è parte di un thread, altrimenti come risposta normale
+                    if "thread_ts" in message:
+                        # Se è già un thread, rispondi nello stesso thread
+                        say(text=response_text, thread_ts=message["thread_ts"])
+                    else:
+                        # Se non è un thread, crea una risposta nel thread del messaggio originale
+                        say(text=response_text, thread_ts=message["ts"])
+                except Exception as e:
+                    logger.error(f"Error sending duplicate link notification: {e}")
+            
+            # Salva il link nella tabella (anche se è duplicato, vogliamo tracciarlo)
+            try:
+                timestamp = float(message.get("ts", 0))
+                posted_date = datetime.fromtimestamp(timestamp).isoformat()
+                
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO posted_links 
+                    (normalized_url, original_url, message_timestamp, channel, permalink, posted_date)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_url,
+                        original_url,
+                        message["ts"],
+                        message["channel"],
+                        current_permalink,
+                        posted_date
+                    )
+                )
+                conn.commit()
+            except Exception as e:
+                logger.error(f"Error storing link in database: {e}")
+                conn.rollback()
+                
+    except Exception as e:
+        logger.error(f"Error in check_and_store_links: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 @app.event("member_joined_channel")
 def handle_join(event):
     conn, cursor = db_connect(database_path)
@@ -303,12 +448,18 @@ def handle_message(message, say):
             ),
         )
         conn.commit()
+        conn.close()
+
+        # Check for duplicate links and respond if found
+        check_and_store_links(message, permalink, say)
 
         # Ensure that the user exists in the DB
+        conn, cursor = db_connect(database_path)
         cursor.execute("SELECT * FROM users WHERE id = ?", (message["user"],))
         row = cursor.fetchone()
         if row is None:
             update_users(conn, cursor)
+        conn.close()
 
     logger.debug("--------------------------")
 

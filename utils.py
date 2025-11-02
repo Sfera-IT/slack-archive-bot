@@ -206,6 +206,25 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Tabella per tracciare i link postati
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS posted_links (
+                normalized_url TEXT NOT NULL,
+                original_url TEXT NOT NULL,
+                message_timestamp TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                permalink TEXT NOT NULL,
+                posted_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (normalized_url, message_timestamp)
+            )
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
 
 
 def db_connect(database_path):
