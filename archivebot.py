@@ -271,6 +271,19 @@ def check_and_store_links(message, permalink_dict, say):
                 # Link duplicato trovato, rispondi al messaggio
                 # existing_link è una tuple: (normalized_url, permalink, posted_date)
                 original_permalink = existing_link[1] if len(existing_link) > 1 else ""
+                posted_date_str = existing_link[2] if len(existing_link) > 2 else "unknown"
+                
+                # Logging dettagliato per debug
+                logger.info(
+                    f"DUPLICATE_LINK_DETECTED: original_url='{original_url}' "
+                    f"normalized_url='{normalized_url}' "
+                    f"previous_permalink='{original_permalink}' "
+                    f"previous_posted_date='{posted_date_str}' "
+                    f"current_message_ts='{message.get('ts', '')}' "
+                    f"current_channel='{message.get('channel', '')}' "
+                    f"user='{user_display_name}'"
+                )
+                
                 response_text = f"Ciao {user_display_name}, questo link è stato già postato e lo trovi qui: {original_permalink}"
                 
                 try:
@@ -278,14 +291,26 @@ def check_and_store_links(message, permalink_dict, say):
                     if "thread_ts" in message:
                         # Se è già un thread, rispondi nello stesso thread
                         say(text=response_text, thread_ts=message["thread_ts"])
+                        logger.debug(f"Sent duplicate notification in existing thread: {message.get('thread_ts')}")
                     else:
                         # Se non è un thread, crea una risposta nel thread del messaggio originale
                         say(text=response_text, thread_ts=message["ts"])
+                        logger.debug(f"Sent duplicate notification in new thread: {message.get('ts')}")
                 except Exception as e:
                     logger.error(f"Error sending duplicate link notification: {e}")
+                
+                # NON salvare il link se è duplicato
+                logger.debug(f"Skipping database insert for duplicate link: {normalized_url}")
+                continue
             
-            # Salva il link nella tabella (anche se è duplicato, vogliamo tracciarlo)
-            # Controlla prima se non è già stato salvato per evitare duplicati nello stesso messaggio
+            # Link non duplicato: salvalo nella tabella
+            logger.debug(
+                f"NEW_LINK_SAVING: original_url='{original_url}' "
+                f"normalized_url='{normalized_url}' "
+                f"message_ts='{message.get('ts', '')}' "
+                f"channel='{message.get('channel', '')}'"
+            )
+            
             try:
                 timestamp = float(message.get("ts", 0))
                 posted_date = datetime.fromtimestamp(timestamp).isoformat()
@@ -306,6 +331,7 @@ def check_and_store_links(message, permalink_dict, say):
                     )
                 )
                 conn.commit()
+                logger.debug(f"Successfully saved new link to database: {normalized_url}")
             except Exception as e:
                 logger.error(f"Error storing link in database: {e}")
                 conn.rollback()
