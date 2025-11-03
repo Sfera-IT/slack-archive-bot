@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from slack_bolt import App
 
 from utils import db_connect, migrate_db
+from url_cleaner import UrlCleaner
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -47,6 +48,9 @@ app = App(
     signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
     logger=logger,
 )
+
+# URL cleaner instance loading local rules
+_url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "url_rules.json"))
 
 # Save the bot user's user ID
 app._bot_user_id = app.client.auth_test()["user_id"]
@@ -189,8 +193,8 @@ def get_permalink_and_save(res):
 def extract_urls(text):
     """Estrae tutti gli URL HTTP/HTTPS da un testo."""
     # Pattern per rilevare URL http/https
-    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-    urls = re.findall(url_pattern, text)
+    url_pattern = r'https?://[^\s<>":{}|\\^`\[\]]+'
+    urls = re.findall(url_pattern, text, flags=re.IGNORECASE)
     # Rimuovi eventuali caratteri di punteggiatura alla fine dell'URL
     cleaned_urls = []
     for url in urls:
@@ -201,27 +205,9 @@ def extract_urls(text):
 
 
 def normalize_url(url):
-    """Normalizza un URL rimuovendo parametri query, fragment e trailing slash."""
+    """Normalizza un URL applicando le regole ClearURLs (provider-aware)."""
     try:
-        parsed = urlparse(url)
-        
-        # Normalizza il netloc (dominio) in minuscolo
-        normalized_netloc = parsed.netloc.lower()
-        
-        # Normalizza il path rimuovendo il trailing slash (tranne per root)
-        normalized_path = parsed.path.rstrip('/') if parsed.path != '/' else '/'
-        
-        # Costruisci l'URL normalizzato senza query e fragment
-        normalized = urlunparse((
-            parsed.scheme.lower(),
-            normalized_netloc,
-            normalized_path,
-            parsed.params,
-            '',  # Query rimossa
-            ''   # Fragment rimosso
-        ))
-        
-        return normalized
+        return _url_cleaner.clean(url)
     except Exception as e:
         logger.warning(f"Error normalizing URL {url}: {e}")
         return url
