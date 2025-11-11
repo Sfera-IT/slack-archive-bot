@@ -527,6 +527,72 @@ def handle_message_changed(event):
     conn.commit()
 
 
+@app.event({"type": "message", "subtype": "message_deleted"})
+def handle_message_deleted(event):
+    """Gestisce la cancellazione di un messaggio e rimuove i link associati dalla tabella posted_links."""
+    deleted_ts = event.get("deleted_ts")
+    channel = event.get("channel")
+    
+    if not deleted_ts:
+        logger.warning("MESSAGE_DELETED: No deleted_ts in event, skipping link cleanup")
+        return
+    
+    conn, cursor = db_connect(database_path)
+    
+    try:
+        # Cerca tutti i link associati a questo messaggio
+        cursor.execute(
+            """
+            SELECT normalized_url, original_url, message_timestamp, channel, permalink
+            FROM posted_links
+            WHERE message_timestamp = ?
+            """,
+            (deleted_ts,)
+        )
+        
+        deleted_links = cursor.fetchall()
+        
+        if deleted_links:
+            # Rimuovi i link dalla tabella
+            cursor.execute(
+                """
+                DELETE FROM posted_links
+                WHERE message_timestamp = ?
+                """,
+                (deleted_ts,)
+            )
+            conn.commit()
+            
+            # Logging dettagliato
+            logger.info(
+                f"MESSAGE_DELETED_LINKS_REMOVED: deleted_ts='{deleted_ts}' "
+                f"channel='{channel}' "
+                f"links_count={len(deleted_links)} "
+                f"links={[(link[0], link[1]) for link in deleted_links]}"
+            )
+            
+            # Log dettagliato per ogni link rimosso
+            for link in deleted_links:
+                logger.debug(
+                    f"REMOVED_LINK: normalized_url='{link[0]}' "
+                    f"original_url='{link[1]}' "
+                    f"message_ts='{link[2]}' "
+                    f"channel='{link[3]}' "
+                    f"permalink='{link[4]}'"
+                )
+        else:
+            logger.debug(
+                f"MESSAGE_DELETED_NO_LINKS: deleted_ts='{deleted_ts}' "
+                f"channel='{channel}' - No links found for this message"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error handling message deletion for ts={deleted_ts}: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 @app.event("channel_created")
 def handle_channel_created(event):
     channel_id = event["channel"]["id"]
