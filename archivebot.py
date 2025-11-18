@@ -571,6 +571,8 @@ def handle_message(message, say):
         cursor.execute("SELECT user, timestamp FROM optout WHERE user = ?", (message["user"],))
         row = cursor.fetchone()
 
+        clown_user = message["user"]
+
         if row is not None:
             message["text"] = "User opted out of archiving. This message has been deleted"
             message["user"] = "USLACKBOT"
@@ -608,7 +610,7 @@ def handle_message(message, say):
         
         # Ottieni il nome utente per controllare se è nella lista clown
         # Controlla name, display_name e real_name per trovare il match
-        cursor.execute("SELECT name, display_name, real_name FROM users WHERE id = ?", (message["user"],))
+        cursor.execute("SELECT name, display_name, real_name FROM users WHERE id = ?", (clown_user,))
         user_row = cursor.fetchone()
         
         # Controlla se l'utente è nella lista clown e aggiungi la reaction
