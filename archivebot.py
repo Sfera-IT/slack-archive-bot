@@ -55,6 +55,11 @@ _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "ur
 # Save the bot user's user ID
 app._bot_user_id = app.client.auth_test()["user_id"]
 
+# Dizionario effimero per tenere traccia degli utenti con clown face
+# Formato: {nickname_lowercase: datetime_scadenza}
+# Ogni utente viene aggiunto per una settimana
+clown_users = {}
+
 
 # Uses slack API to get most recent user list
 # Necessary for User ID correlation
@@ -139,7 +144,48 @@ def update_channels(conn, cursor):
     conn.commit()
 
 
+def clean_expired_clown_users():
+    """Rimuove gli utenti scaduti dalla lista clown."""
+    now = datetime.now()
+    expired = [nickname for nickname, expiry in clown_users.items() if expiry < now]
+    for nickname in expired:
+        del clown_users[nickname]
+        logger.debug(f"Removed expired clown user: {nickname}")
+
+
 def handle_query(event, cursor, say):
+    text = event.get("text", "").strip()
+    
+    # Gestisci comando /clown
+    if text.startswith("/clown "):
+        nickname = text[7:].strip()  # Rimuovi "/clown " e spazi
+        if nickname:
+            nickname_lower = nickname.lower()
+            expiry_date = datetime.now() + timedelta(days=7)
+            clown_users[nickname_lower] = expiry_date
+            clean_expired_clown_users()  # Pulisci utenti scaduti
+            say(f"✅ Aggiunto {nickname} alla lista clown per una settimana (scade il {expiry_date.strftime('%Y-%m-%d %H:%M:%S')})")
+            logger.info(f"Added clown user: {nickname} (expires: {expiry_date})")
+        else:
+            say("❌ Devi specificare un nickname. Uso: /clown nickname")
+        return
+    
+    # Gestisci comando /clownremove
+    if text.startswith("/clownremove "):
+        nickname = text[13:].strip()  # Rimuovi "/clownremove " e spazi
+        if nickname:
+            nickname_lower = nickname.lower()
+            if nickname_lower in clown_users:
+                del clown_users[nickname_lower]
+                say(f"✅ Rimosso {nickname} dalla lista clown")
+                logger.info(f"Removed clown user: {nickname}")
+            else:
+                say(f"❌ {nickname} non è nella lista clown")
+        else:
+            say("❌ Devi specificare un nickname. Uso: /clownremove nickname")
+        return
+    
+    # Comportamento di default per altri messaggi
     say("Questa interfaccia è stata disattivata. Ora puoi andare qui: https://sferaarchive-client.vercel.app/")
     return
 
@@ -503,6 +549,28 @@ def handle_message(message, say):
         row = cursor.fetchone()
         if row is None:
             update_users(conn, cursor)
+        
+        # Ottieni il nome utente per controllare se è nella lista clown
+        cursor.execute("SELECT name FROM users WHERE id = ?", (message["user"],))
+        user_row = cursor.fetchone()
+        
+        # Pulisci utenti scaduti prima di controllare
+        clean_expired_clown_users()
+        
+        # Controlla se l'utente è nella lista clown e aggiungi la reaction
+        if user_row and clown_users:
+            user_name = user_row[0].lower() if user_row[0] else ""
+            if user_name in clown_users:
+                try:
+                    app.client.reactions_add(
+                        channel=message["channel"],
+                        timestamp=message["ts"],
+                        name="clown_face"
+                    )
+                    logger.debug(f"Added clown reaction to message from user: {user_row[0]}")
+                except Exception as e:
+                    logger.warning(f"Failed to add clown reaction: {e}")
+        
         conn.close()
 
     logger.debug("--------------------------")
