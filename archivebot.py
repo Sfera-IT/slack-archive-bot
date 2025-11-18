@@ -607,24 +607,48 @@ def handle_message(message, say):
             update_users(conn, cursor)
         
         # Ottieni il nome utente per controllare se è nella lista clown
-        cursor.execute("SELECT name FROM users WHERE id = ?", (message["user"],))
+        # Controlla name, display_name e real_name per trovare il match
+        cursor.execute("SELECT name, display_name, real_name FROM users WHERE id = ?", (message["user"],))
         user_row = cursor.fetchone()
         
         # Controlla se l'utente è nella lista clown e aggiungi la reaction
         if user_row:
-            user_name = user_row[0] if user_row[0] else ""
-            user_name_lower = user_name.lower()
-            logger.debug(f"[CLOWN] Checking user: '{user_name}' (lowercase: '{user_name_lower}')")
+            name = user_row[0] if user_row[0] else ""
+            display_name = user_row[1] if user_row[1] else ""
+            real_name = user_row[2] if user_row[2] else ""
+            
+            logger.debug(f"[CLOWN] User data from DB - name: '{name}', display_name: '{display_name}', real_name: '{real_name}'")
             
             # Pulisci utenti scaduti e controlla se l'utente è nella lista
             clean_expired_clown_users(conn, cursor)
             
-            if is_user_in_clown_list(conn, cursor, user_name_lower):
+            # Controlla tutti i possibili nickname (name, display_name, real_name)
+            # in ordine di priorità: display_name > name > real_name
+            user_names_to_check = []
+            if display_name:
+                user_names_to_check.append(display_name.lower())
+            if name and name.lower() not in user_names_to_check:
+                user_names_to_check.append(name.lower())
+            if real_name and real_name.lower() not in user_names_to_check:
+                user_names_to_check.append(real_name.lower())
+            
+            logger.debug(f"[CLOWN] Checking user names (lowercase): {user_names_to_check}")
+            
+            # Controlla se uno dei nickname corrisponde
+            found_in_list = False
+            matched_nickname = None
+            for user_name_lower in user_names_to_check:
+                if is_user_in_clown_list(conn, cursor, user_name_lower):
+                    found_in_list = True
+                    matched_nickname = user_name_lower
+                    break
+            
+            if found_in_list:
                 # Ottieni la data di scadenza per il log
-                cursor.execute("SELECT expiry_date FROM clown_users WHERE nickname = ?", (user_name_lower,))
+                cursor.execute("SELECT expiry_date FROM clown_users WHERE nickname = ?", (matched_nickname,))
                 expiry_result = cursor.fetchone()
                 expiry = expiry_result[0] if expiry_result else "unknown"
-                logger.info(f"[CLOWN] User '{user_name}' found in clown list (expires: {expiry})")
+                logger.info(f"[CLOWN] User '{matched_nickname}' found in clown list (expires: {expiry})")
                 try:
                     result = app.client.reactions_add(
                         channel=message["channel"],
@@ -632,14 +656,14 @@ def handle_message(message, say):
                         name="clown_face"
                     )
                     if result.get("ok"):
-                        logger.info(f"[CLOWN] ✅ Successfully added clown reaction to message from user: {user_name}")
+                        logger.info(f"[CLOWN] ✅ Successfully added clown reaction to message from user: {matched_nickname}")
                     else:
                         logger.warning(f"[CLOWN] ❌ Failed to add reaction: {result.get('error', 'unknown error')}")
                 except Exception as e:
                     logger.error(f"[CLOWN] ❌ Exception adding clown reaction: {e}")
                     logger.error(traceback.format_exc())
             else:
-                logger.debug(f"[CLOWN] User '{user_name}' not in clown list")
+                logger.debug(f"[CLOWN] User not in clown list (checked: {user_names_to_check})")
         else:
             logger.warning(f"[CLOWN] Could not find user in database for user_id: {message.get('user', 'unknown')}")
         
