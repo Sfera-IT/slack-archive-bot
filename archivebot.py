@@ -55,10 +55,8 @@ _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "ur
 # Save the bot user's user ID
 app._bot_user_id = app.client.auth_test()["user_id"]
 
-# Dizionario effimero per tenere traccia degli utenti con clown face
-# Formato: {nickname_lowercase: datetime_scadenza}
-# Ogni utente viene aggiunto per una settimana
-clown_users = {}
+# Nota: clown_users è ora memorizzato nel database per essere condiviso tra worker Gunicorn
+# Le funzioni seguenti gestiscono la lettura/scrittura dal database
 
 
 # Uses slack API to get most recent user list
@@ -144,21 +142,53 @@ def update_channels(conn, cursor):
     conn.commit()
 
 
-def clean_expired_clown_users():
-    """Rimuove gli utenti scaduti dalla lista clown."""
-    now = datetime.now()
-    expired = [nickname for nickname, expiry in clown_users.items() if expiry < now]
+def clean_expired_clown_users(conn, cursor):
+    """Rimuove gli utenti scaduti dalla lista clown nel database."""
+    now = datetime.now().isoformat()
+    cursor.execute("SELECT nickname FROM clown_users WHERE expiry_date < ?", (now,))
+    expired = [row[0] for row in cursor.fetchall()]
+    
     if expired:
         logger.info(f"[CLOWN] Cleaning {len(expired)} expired users: {expired}")
-    for nickname in expired:
-        del clown_users[nickname]
-        logger.info(f"[CLOWN] Removed expired clown user: {nickname}")
+        cursor.execute("DELETE FROM clown_users WHERE expiry_date < ?", (now,))
+        conn.commit()
+        for nickname in expired:
+            logger.info(f"[CLOWN] Removed expired clown user: {nickname}")
     
     # Log stato attuale della lista
-    if clown_users:
-        logger.info(f"[CLOWN] Current clown users: {list(clown_users.keys())}")
+    cursor.execute("SELECT nickname, expiry_date FROM clown_users")
+    current_users = cursor.fetchall()
+    if current_users:
+        user_list = [f"{nickname} (expires: {expiry})" for nickname, expiry in current_users]
+        logger.info(f"[CLOWN] Current clown users: {user_list}")
     else:
         logger.info("[CLOWN] No users in clown list")
+
+
+def is_user_in_clown_list(conn, cursor, nickname_lower):
+    """Verifica se un utente è nella lista clown e non è scaduto."""
+    clean_expired_clown_users(conn, cursor)
+    cursor.execute("SELECT expiry_date FROM clown_users WHERE nickname = ?", (nickname_lower,))
+    result = cursor.fetchone()
+    return result is not None
+
+
+def add_clown_user(conn, cursor, nickname_lower, expiry_date):
+    """Aggiunge un utente alla lista clown nel database."""
+    expiry_str = expiry_date.isoformat()
+    cursor.execute(
+        "INSERT OR REPLACE INTO clown_users (nickname, expiry_date) VALUES (?, ?)",
+        (nickname_lower, expiry_str)
+    )
+    conn.commit()
+    logger.info(f"[CLOWN] Added {nickname_lower} to clown list in DB, expires: {expiry_date}")
+
+
+def remove_clown_user(conn, cursor, nickname_lower):
+    """Rimuove un utente dalla lista clown nel database."""
+    cursor.execute("DELETE FROM clown_users WHERE nickname = ?", (nickname_lower,))
+    conn.commit()
+    logger.info(f"[CLOWN] Removed {nickname_lower} from clown list in DB")
 
 
 def handle_query(event, cursor, say):
@@ -174,9 +204,8 @@ def handle_query(event, cursor, say):
         if nickname:
             nickname_lower = nickname.lower()
             expiry_date = datetime.now() + timedelta(days=7)
-            clown_users[nickname_lower] = expiry_date
-            logger.info(f"[CLOWN] Added {nickname} (lowercase: {nickname_lower}) to clown list, expires: {expiry_date}")
-            clean_expired_clown_users()  # Pulisci utenti scaduti
+            add_clown_user(cursor.connection, cursor, nickname_lower, expiry_date)
+            clean_expired_clown_users(cursor.connection, cursor)  # Pulisci utenti scaduti
             say(f"✅ Aggiunto {nickname} alla lista clown per una settimana (scade il {expiry_date.strftime('%Y-%m-%d %H:%M:%S')})")
         else:
             logger.warning("[CLOWN] /clown command without nickname")
@@ -189,12 +218,14 @@ def handle_query(event, cursor, say):
         logger.info(f"[CLOWN] Processing /clownremove command with nickname: '{nickname}'")
         if nickname:
             nickname_lower = nickname.lower()
-            if nickname_lower in clown_users:
-                del clown_users[nickname_lower]
-                logger.info(f"[CLOWN] Removed {nickname} (lowercase: {nickname_lower}) from clown list")
+            if is_user_in_clown_list(cursor.connection, cursor, nickname_lower):
+                remove_clown_user(cursor.connection, cursor, nickname_lower)
                 say(f"✅ Rimosso {nickname} dalla lista clown")
             else:
-                logger.info(f"[CLOWN] {nickname} (lowercase: {nickname_lower}) not found in clown list. Current list: {list(clown_users.keys())}")
+                # Mostra lista corrente per debug
+                cursor.execute("SELECT nickname FROM clown_users")
+                current_list = [row[0] for row in cursor.fetchall()]
+                logger.info(f"[CLOWN] {nickname} (lowercase: {nickname_lower}) not found in clown list. Current list: {current_list}")
                 say(f"❌ {nickname} non è nella lista clown")
         else:
             logger.warning("[CLOWN] /clownremove command without nickname")
@@ -579,37 +610,36 @@ def handle_message(message, say):
         cursor.execute("SELECT name FROM users WHERE id = ?", (message["user"],))
         user_row = cursor.fetchone()
         
-        # Pulisci utenti scaduti prima di controllare
-        clean_expired_clown_users()
-        
         # Controlla se l'utente è nella lista clown e aggiungi la reaction
         if user_row:
             user_name = user_row[0] if user_row[0] else ""
             user_name_lower = user_name.lower()
             logger.debug(f"[CLOWN] Checking user: '{user_name}' (lowercase: '{user_name_lower}')")
-            logger.debug(f"[CLOWN] Current clown list: {list(clown_users.keys())}")
             
-            if clown_users:
-                if user_name_lower in clown_users:
-                    expiry = clown_users[user_name_lower]
-                    logger.info(f"[CLOWN] User '{user_name}' found in clown list (expires: {expiry})")
-                    try:
-                        result = app.client.reactions_add(
-                            channel=message["channel"],
-                            timestamp=message["ts"],
-                            name="clown_face"
-                        )
-                        if result.get("ok"):
-                            logger.info(f"[CLOWN] ✅ Successfully added clown reaction to message from user: {user_name}")
-                        else:
-                            logger.warning(f"[CLOWN] ❌ Failed to add reaction: {result.get('error', 'unknown error')}")
-                    except Exception as e:
-                        logger.error(f"[CLOWN] ❌ Exception adding clown reaction: {e}")
-                        logger.error(traceback.format_exc())
-                else:
-                    logger.debug(f"[CLOWN] User '{user_name}' not in clown list")
+            # Pulisci utenti scaduti e controlla se l'utente è nella lista
+            clean_expired_clown_users(conn, cursor)
+            
+            if is_user_in_clown_list(conn, cursor, user_name_lower):
+                # Ottieni la data di scadenza per il log
+                cursor.execute("SELECT expiry_date FROM clown_users WHERE nickname = ?", (user_name_lower,))
+                expiry_result = cursor.fetchone()
+                expiry = expiry_result[0] if expiry_result else "unknown"
+                logger.info(f"[CLOWN] User '{user_name}' found in clown list (expires: {expiry})")
+                try:
+                    result = app.client.reactions_add(
+                        channel=message["channel"],
+                        timestamp=message["ts"],
+                        name="clown_face"
+                    )
+                    if result.get("ok"):
+                        logger.info(f"[CLOWN] ✅ Successfully added clown reaction to message from user: {user_name}")
+                    else:
+                        logger.warning(f"[CLOWN] ❌ Failed to add reaction: {result.get('error', 'unknown error')}")
+                except Exception as e:
+                    logger.error(f"[CLOWN] ❌ Exception adding clown reaction: {e}")
+                    logger.error(traceback.format_exc())
             else:
-                logger.debug("[CLOWN] Clown list is empty")
+                logger.debug(f"[CLOWN] User '{user_name}' not in clown list")
         else:
             logger.warning(f"[CLOWN] Could not find user in database for user_id: {message.get('user', 'unknown')}")
         

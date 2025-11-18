@@ -238,6 +238,20 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Tabella per gli utenti clown (condivisa tra worker)
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS clown_users (
+                nickname TEXT NOT NULL PRIMARY KEY,
+                expiry_date TEXT NOT NULL
+            )
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
 
 
 def db_connect(database_path):
