@@ -148,44 +148,61 @@ def clean_expired_clown_users():
     """Rimuove gli utenti scaduti dalla lista clown."""
     now = datetime.now()
     expired = [nickname for nickname, expiry in clown_users.items() if expiry < now]
+    if expired:
+        logger.info(f"[CLOWN] Cleaning {len(expired)} expired users: {expired}")
     for nickname in expired:
         del clown_users[nickname]
-        logger.debug(f"Removed expired clown user: {nickname}")
+        logger.info(f"[CLOWN] Removed expired clown user: {nickname}")
+    
+    # Log stato attuale della lista
+    if clown_users:
+        logger.info(f"[CLOWN] Current clown users: {list(clown_users.keys())}")
+    else:
+        logger.info("[CLOWN] No users in clown list")
 
 
 def handle_query(event, cursor, say):
     text = event.get("text", "").strip()
+    user_id = event.get("user", "unknown")
+    
+    logger.info(f"[CLOWN] Received DM from user {user_id}, text: '{text}'")
     
     # Gestisci comando /clown
     if text.startswith("/clown "):
         nickname = text[7:].strip()  # Rimuovi "/clown " e spazi
+        logger.info(f"[CLOWN] Processing /clown command with nickname: '{nickname}'")
         if nickname:
             nickname_lower = nickname.lower()
             expiry_date = datetime.now() + timedelta(days=7)
             clown_users[nickname_lower] = expiry_date
+            logger.info(f"[CLOWN] Added {nickname} (lowercase: {nickname_lower}) to clown list, expires: {expiry_date}")
             clean_expired_clown_users()  # Pulisci utenti scaduti
             say(f"✅ Aggiunto {nickname} alla lista clown per una settimana (scade il {expiry_date.strftime('%Y-%m-%d %H:%M:%S')})")
-            logger.info(f"Added clown user: {nickname} (expires: {expiry_date})")
         else:
+            logger.warning("[CLOWN] /clown command without nickname")
             say("❌ Devi specificare un nickname. Uso: /clown nickname")
         return
     
     # Gestisci comando /clownremove
     if text.startswith("/clownremove "):
         nickname = text[13:].strip()  # Rimuovi "/clownremove " e spazi
+        logger.info(f"[CLOWN] Processing /clownremove command with nickname: '{nickname}'")
         if nickname:
             nickname_lower = nickname.lower()
             if nickname_lower in clown_users:
                 del clown_users[nickname_lower]
+                logger.info(f"[CLOWN] Removed {nickname} (lowercase: {nickname_lower}) from clown list")
                 say(f"✅ Rimosso {nickname} dalla lista clown")
-                logger.info(f"Removed clown user: {nickname}")
             else:
+                logger.info(f"[CLOWN] {nickname} (lowercase: {nickname_lower}) not found in clown list. Current list: {list(clown_users.keys())}")
                 say(f"❌ {nickname} non è nella lista clown")
         else:
+            logger.warning("[CLOWN] /clownremove command without nickname")
             say("❌ Devi specificare un nickname. Uso: /clownremove nickname")
         return
     
     # Comportamento di default per altri messaggi
+    logger.debug(f"[CLOWN] DM not a clown command, using default response")
     say("Questa interfaccia è stata disattivata. Ora puoi andare qui: https://sferaarchive-client.vercel.app/")
     return
 
@@ -488,13 +505,21 @@ def handle_user_change(event):
 
 def handle_message(message, say):
     logger.debug(message)
+    user_id = message.get("user", "unknown")
+    channel_type = message.get("channel_type", "unknown")
+    text_preview = message.get("text", "")[:50] if message.get("text") else "(no text)"
+    
+    logger.info(f"[CLOWN] handle_message called - user: {user_id}, channel_type: {channel_type}, text_preview: '{text_preview}...'")
+    
     if "text" not in message or message["user"] == "USLACKBOT":
+        logger.debug("[CLOWN] Skipping message: no text or from USLACKBOT")
         return
 
     conn, cursor = db_connect(database_path)
 
     # If it's a DM, treat it as a search query
     if message["channel_type"] == "im":
+        logger.info(f"[CLOWN] Message is a DM, routing to handle_query")
         handle_query(message, cursor, say)
     elif "user" not in message:
         logger.warning("No valid user. Previous event not saved")
@@ -558,18 +583,35 @@ def handle_message(message, say):
         clean_expired_clown_users()
         
         # Controlla se l'utente è nella lista clown e aggiungi la reaction
-        if user_row and clown_users:
-            user_name = user_row[0].lower() if user_row[0] else ""
-            if user_name in clown_users:
-                try:
-                    app.client.reactions_add(
-                        channel=message["channel"],
-                        timestamp=message["ts"],
-                        name="clown_face"
-                    )
-                    logger.debug(f"Added clown reaction to message from user: {user_row[0]}")
-                except Exception as e:
-                    logger.warning(f"Failed to add clown reaction: {e}")
+        if user_row:
+            user_name = user_row[0] if user_row[0] else ""
+            user_name_lower = user_name.lower()
+            logger.debug(f"[CLOWN] Checking user: '{user_name}' (lowercase: '{user_name_lower}')")
+            logger.debug(f"[CLOWN] Current clown list: {list(clown_users.keys())}")
+            
+            if clown_users:
+                if user_name_lower in clown_users:
+                    expiry = clown_users[user_name_lower]
+                    logger.info(f"[CLOWN] User '{user_name}' found in clown list (expires: {expiry})")
+                    try:
+                        result = app.client.reactions_add(
+                            channel=message["channel"],
+                            timestamp=message["ts"],
+                            name="clown_face"
+                        )
+                        if result.get("ok"):
+                            logger.info(f"[CLOWN] ✅ Successfully added clown reaction to message from user: {user_name}")
+                        else:
+                            logger.warning(f"[CLOWN] ❌ Failed to add reaction: {result.get('error', 'unknown error')}")
+                    except Exception as e:
+                        logger.error(f"[CLOWN] ❌ Exception adding clown reaction: {e}")
+                        logger.error(traceback.format_exc())
+                else:
+                    logger.debug(f"[CLOWN] User '{user_name}' not in clown list")
+            else:
+                logger.debug("[CLOWN] Clown list is empty")
+        else:
+            logger.warning(f"[CLOWN] Could not find user in database for user_id: {message.get('user', 'unknown')}")
         
         conn.close()
 
@@ -703,6 +745,9 @@ def init():
         update_channels(conn, cursor)
     except Exception as e:
         logger.error("Error updating users and channels: %s" % e)
+    
+    # Log stato iniziale della lista clown
+    logger.info(f"[CLOWN] Bot initialized. Clown list is empty (will be populated via DM commands)")
         
         
 def main():
