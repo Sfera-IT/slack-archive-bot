@@ -249,12 +249,12 @@ def check_and_store_links(message, permalink_dict, say):
         for original_url in urls:
             normalized_url = normalize_url(original_url)
             
-            # Controlla se esiste già un link normalizzato simile negli ultimi 30 giorni
+            # Controlla se esiste già un link normalizzato simile negli ultimi 45 giorni
             # Escludi il messaggio corrente dalla ricerca per evitare di trovare il link appena salvato
-            thirty_days_ago = datetime.now() - timedelta(days=30)
+            forty_five_days_ago = datetime.now() - timedelta(days=45)
             cursor.execute(
                 """
-                SELECT normalized_url, permalink, posted_date 
+                SELECT normalized_url, permalink, posted_date, duplicate_notified, message_timestamp
                 FROM posted_links 
                 WHERE normalized_url = ? 
                 AND posted_date >= ?
@@ -262,16 +262,18 @@ def check_and_store_links(message, permalink_dict, say):
                 ORDER BY posted_date DESC
                 LIMIT 1
                 """,
-                (normalized_url, thirty_days_ago.isoformat(), message.get("ts", ""))
+                (normalized_url, forty_five_days_ago.isoformat(), message.get("ts", ""))
             )
             
             existing_link = cursor.fetchone()
             
             if existing_link:
-                # Link duplicato trovato, rispondi al messaggio
-                # existing_link è una tuple: (normalized_url, permalink, posted_date)
+                # Link duplicato trovato
+                # existing_link è una tuple: (normalized_url, permalink, posted_date, duplicate_notified, message_timestamp)
                 original_permalink = existing_link[1] if len(existing_link) > 1 else ""
                 posted_date_str = existing_link[2] if len(existing_link) > 2 else "unknown"
+                already_notified = existing_link[3] if len(existing_link) > 3 else 0
+                previous_message_ts = existing_link[4] if len(existing_link) > 4 else ""
                 
                 # Logging dettagliato per debug
                 logger.info(
@@ -279,25 +281,44 @@ def check_and_store_links(message, permalink_dict, say):
                     f"normalized_url='{normalized_url}' "
                     f"previous_permalink='{original_permalink}' "
                     f"previous_posted_date='{posted_date_str}' "
+                    f"previous_message_ts='{previous_message_ts}' "
+                    f"already_notified={bool(already_notified)} "
                     f"current_message_ts='{message.get('ts', '')}' "
                     f"current_channel='{message.get('channel', '')}' "
                     f"user='{user_display_name}'"
                 )
                 
-                response_text = f"Ciao {user_display_name}, questo link è stato già postato e lo trovi qui: {original_permalink}"
-                
-                try:
-                    # Rispondi nel thread se il messaggio è parte di un thread, altrimenti come risposta normale
-                    if "thread_ts" in message:
-                        # Se è già un thread, rispondi nello stesso thread
-                        say(text=response_text, thread_ts=message["thread_ts"])
-                        logger.debug(f"Sent duplicate notification in existing thread: {message.get('thread_ts')}")
-                    else:
-                        # Se non è un thread, crea una risposta nel thread del messaggio originale
-                        say(text=response_text, thread_ts=message["ts"])
-                        logger.debug(f"Sent duplicate notification in new thread: {message.get('ts')}")
-                except Exception as e:
-                    logger.error(f"Error sending duplicate link notification: {e}")
+                # Notifica solo se non è già stato notificato
+                if not already_notified:
+                    response_text = f"Ciao {user_display_name}, questo link è stato già postato e lo trovi qui: {original_permalink}"
+                    
+                    try:
+                        # Rispondi nel thread se il messaggio è parte di un thread, altrimenti come risposta normale
+                        if "thread_ts" in message:
+                            # Se è già un thread, rispondi nello stesso thread
+                            say(text=response_text, thread_ts=message["thread_ts"])
+                            logger.debug(f"Sent duplicate notification in existing thread: {message.get('thread_ts')}")
+                        else:
+                            # Se non è un thread, crea una risposta nel thread del messaggio originale
+                            say(text=response_text, thread_ts=message["ts"])
+                            logger.debug(f"Sent duplicate notification in new thread: {message.get('ts')}")
+                        
+                        # Aggiorna il flag duplicate_notified per il link trovato
+                        cursor.execute(
+                            """
+                            UPDATE posted_links
+                            SET duplicate_notified = 1
+                            WHERE normalized_url = ? AND message_timestamp = ?
+                            """,
+                            (normalized_url, previous_message_ts)
+                        )
+                        conn.commit()
+                        logger.debug(f"Marked link as notified: {normalized_url} (message_ts: {previous_message_ts})")
+                    except Exception as e:
+                        logger.error(f"Error sending duplicate link notification or updating flag: {e}")
+                        conn.rollback()
+                else:
+                    logger.debug(f"Link already notified, skipping notification: {normalized_url}")
                 
                 # NON salvare il link se è duplicato
                 logger.debug(f"Skipping database insert for duplicate link: {normalized_url}")
@@ -318,8 +339,8 @@ def check_and_store_links(message, permalink_dict, say):
                 cursor.execute(
                     """
                     INSERT OR IGNORE INTO posted_links 
-                    (normalized_url, original_url, message_timestamp, channel, permalink, posted_date)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (normalized_url, original_url, message_timestamp, channel, permalink, posted_date, duplicate_notified)
+                    VALUES (?, ?, ?, ?, ?, ?, 0)
                     """,
                     (
                         normalized_url,

@@ -225,6 +225,19 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Aggiungi colonna duplicate_notified per tracciare se un link è già stato segnalato come duplicato
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE posted_links
+            ADD COLUMN duplicate_notified BOOLEAN DEFAULT 0
+            NOT NULL CHECK (duplicate_notified IN (0,1))
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
 
 
 def db_connect(database_path):
