@@ -787,21 +787,36 @@ def check_ai_throttle(conn, cursor, user_id, channel):
     - message: messaggio da inviare se throttled
     - throttle_info: dict con info sul throttle per logging"""
     now = datetime.now()
-    now_iso = now.isoformat()
-    one_minute_ago = (now - timedelta(minutes=1)).isoformat()
-    one_hour_ago = (now - timedelta(hours=1)).isoformat()
+    # Usa timestamp Unix per confronti più precisi
+    now_timestamp = now.timestamp()
+    one_minute_ago_timestamp = (now - timedelta(minutes=1)).timestamp()
+    one_hour_ago_timestamp = (now - timedelta(hours=1)).timestamp()
     
-    # Conta richieste nell'ultimo minuto
+    # Converti in ISO per il database (usiamo formato senza microsecondi per consistenza)
+    now_iso = now.strftime("%Y-%m-%d %H:%M:%S")
+    one_minute_ago_iso = (now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    one_hour_ago_iso = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Prima pulisci richieste vecchie (più di 1 ora) per mantenere il database pulito
+    # Usa un margine di sicurezza: cancella quelle più vecchie di 1 ora e 5 minuti
+    cleanup_threshold = (now - timedelta(hours=1, minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("DELETE FROM ai_requests WHERE timestamp < ?", (cleanup_threshold,))
+    deleted_count = cursor.rowcount
+    if deleted_count > 0:
+        logger.debug(f"[AI] Cleaned up {deleted_count} old throttle records")
+    conn.commit()
+    
+    # Conta richieste nell'ultimo minuto (usando confronto stringa ISO che funziona per questo formato)
     cursor.execute(
         "SELECT COUNT(*) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
-        (one_minute_ago, user_id)
+        (one_minute_ago_iso, user_id)
     )
     requests_last_minute = cursor.fetchone()[0]
     
     # Conta richieste nell'ultima ora
     cursor.execute(
         "SELECT COUNT(*) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
-        (one_hour_ago, user_id)
+        (one_hour_ago_iso, user_id)
     )
     requests_last_hour = cursor.fetchone()[0]
     
@@ -809,7 +824,9 @@ def check_ai_throttle(conn, cursor, user_id, channel):
         "requests_last_minute": requests_last_minute,
         "requests_last_hour": requests_last_hour,
         "limit_per_minute": 2,
-        "limit_per_hour": 20
+        "limit_per_hour": 20,
+        "one_hour_ago": one_hour_ago_iso,
+        "now": now_iso
     }
     
     # Controlla limiti
@@ -834,11 +851,7 @@ def check_ai_throttle(conn, cursor, user_id, channel):
     )
     conn.commit()
     
-    # Pulisci richieste vecchie (più di 1 ora)
-    cursor.execute("DELETE FROM ai_requests WHERE timestamp < ?", (one_hour_ago,))
-    conn.commit()
-    
-    logger.info(f"[AI] Throttle OK: {requests_last_minute}/2 per minuto, {requests_last_hour}/20 per ora")
+    logger.info(f"[AI] Throttle OK: {requests_last_minute}/2 per minuto, {requests_last_hour}/20 per ora (now: {now_iso}, one_hour_ago: {one_hour_ago_iso})")
     return True, None, throttle_info
 
 
@@ -942,8 +955,34 @@ Rispondi basandoti sulla conversazione sopra."""
         
         logger.info(f"[AI] Received response from OpenAI, length: {len(ai_response)}")
         
+        # Recupera le informazioni sul throttle corrente per aggiungerle alla risposta
+        conn_throttle, cursor_throttle = db_connect(database_path)
+        now = datetime.now()
+        one_minute_ago_iso = (now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        one_hour_ago_iso = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        
+        cursor_throttle.execute(
+            "SELECT COUNT(*) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
+            (one_minute_ago_iso, user_id)
+        )
+        current_minute_count = cursor_throttle.fetchone()[0]
+        
+        cursor_throttle.execute(
+            "SELECT COUNT(*) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
+            (one_hour_ago_iso, user_id)
+        )
+        current_hour_count = cursor_throttle.fetchone()[0]
+        
+        conn_throttle.close()
+        
+        # Aggiungi la riga con i rate limit alla risposta
+        rate_limit_info = f"\n\n_📊 Rate limit: {current_minute_count}/2 al minuto, {current_hour_count}/20 all'ora_"
+        final_response = ai_response + rate_limit_info
+        
+        logger.info(f"[AI] Added rate limit info: {current_minute_count}/2 per minuto, {current_hour_count}/20 per ora")
+        
         # Rispondi nel thread
-        say(ai_response, thread_ts=actual_thread_ts)
+        say(final_response, thread_ts=actual_thread_ts)
         
     except Exception as e:
         logger.error(f"[AI] Error handling app mention: {e}")
