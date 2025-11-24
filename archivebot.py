@@ -308,7 +308,13 @@ def normalize_url(url):
 
 
 def check_and_store_links(message, permalink_dict, say):
-    """Controlla se ci sono link nel messaggio e verifica duplicati."""
+    """Controlla se ci sono link nel messaggio e verifica duplicati.
+    Il controllo viene fatto solo sui messaggi principali, non sulle risposte nei thread."""
+    # Salta il controllo se è una risposta in un thread (ha thread_ts diverso dal timestamp)
+    if "thread_ts" in message and message.get("thread_ts") != message.get("ts"):
+        logger.debug("Skipping link check for thread reply (not a main message)")
+        return
+    
     text = message.get("text", "")
     if not text:
         return
@@ -341,6 +347,11 @@ def check_and_store_links(message, permalink_dict, say):
             user_display_name = "utente"
         
         for original_url in urls:
+            # Escludi i link di Slack dall'analisi
+            if original_url.startswith("https://sferait-ws.slack.com/") or original_url.startswith("http://sferait-ws.slack.com/"):
+                logger.debug(f"Skipping Slack link from duplicate check: {original_url}")
+                continue
+            
             normalized_url = normalize_url(original_url)
             
             # Controlla se esiste già un link normalizzato simile negli ultimi 45 giorni
