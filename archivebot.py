@@ -10,6 +10,7 @@ from urllib.parse import urlparse, urlunparse
 from datetime import datetime, timedelta
 
 from slack_bolt import App
+from openai import OpenAI
 
 from utils import db_connect, migrate_db
 from url_cleaner import UrlCleaner
@@ -707,6 +708,159 @@ def handle_message_with_file(event, say):
 @app.message("")
 def handle_message_default(message, say):
     handle_message(message, say)
+
+
+def get_thread_messages(channel, thread_ts):
+    """Recupera tutti i messaggi di un thread."""
+    try:
+        all_messages = []
+        cursor = None
+        
+        # Usa conversations_replies per recuperare tutti i messaggi del thread
+        response = app.client.conversations_replies(channel=channel, ts=thread_ts)
+        messages = response.get("messages", [])
+        
+        # Continua a recuperare se ci sono più pagine
+        while response.get("has_more", False):
+            cursor = response.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+            response = app.client.conversations_replies(
+                channel=channel, ts=thread_ts, cursor=cursor
+            )
+            messages.extend(response.get("messages", []))
+        
+        # Ordina i messaggi per timestamp
+        messages.sort(key=lambda x: float(x.get("ts", 0)))
+        
+        # Recupera i nomi utente dal database
+        conn, db_cursor = db_connect(database_path)
+        
+        for msg in messages:
+            user_id = msg.get("user", "")
+            if not user_id or user_id == "USLACKBOT":
+                continue
+            
+            # Recupera il nome utente dal database
+            db_cursor.execute("SELECT name, display_name, real_name FROM users WHERE id = ?", (user_id,))
+            user_row = db_cursor.fetchone()
+            
+            if user_row:
+                # Usa display_name, poi name, poi real_name
+                user_name = user_row[1] if user_row[1] else (user_row[0] if user_row[0] else user_row[2] if user_row[2] else "Unknown")
+            else:
+                user_name = "Unknown"
+            
+            all_messages.append({
+                "user": user_name,
+                "text": msg.get("text", ""),
+                "ts": msg.get("ts", "")
+            })
+        
+        conn.close()
+        return all_messages
+        
+    except Exception as e:
+        logger.error(f"Error getting thread messages: {e}")
+        logger.error(traceback.format_exc())
+        return []
+
+
+@app.event("app_mention")
+def handle_app_mention(event, say):
+    """Gestisce le menzioni del bot in una conversazione."""
+    try:
+        channel = event.get("channel")
+        thread_ts = event.get("ts")  # Timestamp del messaggio che menziona il bot
+        text = event.get("text", "")
+        user_id = event.get("user", "")
+        
+        logger.info(f"[AI] Bot mentioned by user {user_id} in channel {channel}, thread_ts: {thread_ts}")
+        
+        # Rimuovi la menzione del bot dal testo
+        bot_user_id = app._bot_user_id
+        text = re.sub(rf'<@{bot_user_id}>', '', text).strip()
+        
+        if not text:
+            text = "Puoi aiutarmi con questa conversazione?"
+        
+        # Determina se è un thread o un messaggio principale
+        # Se il messaggio ha thread_ts diverso da ts, è una risposta in un thread
+        # Altrimenti, potrebbe essere l'inizio di un thread o un messaggio principale
+        is_thread_reply = "thread_ts" in event and event.get("thread_ts") != thread_ts
+        
+        if is_thread_reply:
+            # È una risposta in un thread esistente, usa thread_ts
+            actual_thread_ts = event.get("thread_ts")
+        else:
+            # Potrebbe essere un messaggio principale o l'inizio di un thread
+            # Usa il timestamp del messaggio corrente come thread_ts
+            actual_thread_ts = thread_ts
+        
+        logger.info(f"[AI] Fetching thread messages for thread_ts: {actual_thread_ts}")
+        
+        # Recupera tutti i messaggi del thread
+        thread_messages = get_thread_messages(channel, actual_thread_ts)
+        
+        if not thread_messages:
+            say("Non ho trovato messaggi in questa conversazione.", thread_ts=actual_thread_ts)
+            return
+        
+        logger.info(f"[AI] Found {len(thread_messages)} messages in thread")
+        
+        # Formatta i messaggi per il context
+        formatted_messages = "\n".join([
+            f"{msg['user']}: {msg['text']}" for msg in thread_messages
+        ])
+        
+        # Prepara il prompt per ChatGPT
+        system_prompt = """Sei un assistente utile che risponde alle domande basandoti sulle conversazioni di Slack che ti vengono fornite. 
+Rispondi sempre in italiano, in modo chiaro e conciso. 
+Se la domanda non può essere risposta basandoti sulla conversazione fornita, dillo chiaramente."""
+        
+        user_prompt = f"""Ecco la conversazione completa:
+
+{formatted_messages}
+
+Domanda: {text}
+
+Rispondi basandoti sulla conversazione sopra."""
+        
+        # Chiama ChatGPT
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            logger.error("[AI] OPENAI_API_KEY not set")
+            say("Errore: chiave API OpenAI non configurata.", thread_ts=actual_thread_ts)
+            return
+        
+        client = OpenAI(api_key=openai_api_key)
+        
+        logger.info(f"[AI] Sending request to OpenAI with {len(thread_messages)} messages")
+        
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.7,
+        )
+        
+        ai_response = response.choices[0].message.content.strip()
+        
+        logger.info(f"[AI] Received response from OpenAI, length: {len(ai_response)}")
+        
+        # Rispondi nel thread
+        say(ai_response, thread_ts=actual_thread_ts)
+        
+    except Exception as e:
+        logger.error(f"[AI] Error handling app mention: {e}")
+        logger.error(traceback.format_exc())
+        try:
+            say("Mi dispiace, c'è stato un errore nel processare la tua richiesta.", thread_ts=event.get("thread_ts", event.get("ts")))
+        except:
+            pass
 
 
 @app.event({"type": "message", "subtype": "thread_broadcast"})
