@@ -781,7 +781,7 @@ def get_thread_messages(channel, thread_ts):
 
 def check_ai_throttle(conn, cursor, user_id, channel):
     """Controlla se la richiesta rispetta i limiti di throttle.
-    Limiti: 1 messaggio al minuto, 10 messaggi ogni ora.
+    Limiti: 2 messaggi al minuto, 20 messaggi ogni ora.
     Ritorna (allowed, message, throttle_info) dove:
     - allowed: True se permesso, False se throttled
     - message: messaggio da inviare se throttled
@@ -808,23 +808,23 @@ def check_ai_throttle(conn, cursor, user_id, channel):
     throttle_info = {
         "requests_last_minute": requests_last_minute,
         "requests_last_hour": requests_last_hour,
-        "limit_per_minute": 1,
-        "limit_per_hour": 10
+        "limit_per_minute": 2,
+        "limit_per_hour": 20
     }
     
     # Controlla limiti
-    if requests_last_minute >= 1:
+    if requests_last_minute >= 2:
         # Calcola quando sarà possibile inviare di nuovo (tra 1 minuto)
         next_available = (now + timedelta(minutes=1)).strftime("%H:%M:%S")
-        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_minute} richiesta/e nell'ultimo minuto. Prova di nuovo dopo le {next_available}."
-        logger.warning(f"[AI] Throttle exceeded: {requests_last_minute} requests in last minute (limit: 1)")
+        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_minute} richieste nell'ultimo minuto (limite: 2). Prova di nuovo dopo le {next_available}."
+        logger.warning(f"[AI] Throttle exceeded: {requests_last_minute} requests in last minute (limit: 2)")
         return False, message, throttle_info
     
-    if requests_last_hour >= 10:
+    if requests_last_hour >= 20:
         # Calcola quando sarà possibile inviare di nuovo (tra 1 ora)
         next_available = (now + timedelta(hours=1)).strftime("%H:%M:%S")
-        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_hour} richieste nell'ultima ora (limite: 10). Prova di nuovo dopo le {next_available}."
-        logger.warning(f"[AI] Throttle exceeded: {requests_last_hour} requests in last hour (limit: 10)")
+        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_hour} richieste nell'ultima ora (limite: 20). Prova di nuovo dopo le {next_available}."
+        logger.warning(f"[AI] Throttle exceeded: {requests_last_hour} requests in last hour (limit: 20)")
         return False, message, throttle_info
     
     # Registra la richiesta
@@ -838,7 +838,7 @@ def check_ai_throttle(conn, cursor, user_id, channel):
     cursor.execute("DELETE FROM ai_requests WHERE timestamp < ?", (one_hour_ago,))
     conn.commit()
     
-    logger.info(f"[AI] Throttle OK: {requests_last_minute}/1 per minuto, {requests_last_hour}/10 per ora")
+    logger.info(f"[AI] Throttle OK: {requests_last_minute}/2 per minuto, {requests_last_hour}/20 per ora")
     return True, None, throttle_info
 
 
