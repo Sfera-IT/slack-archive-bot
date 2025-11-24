@@ -258,7 +258,7 @@ def migrate_db(conn, cursor):
             """
             CREATE TABLE IF NOT EXISTS ai_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
+                timestamp REAL NOT NULL,
                 user_id TEXT NOT NULL,
                 channel TEXT NOT NULL
             )
@@ -269,8 +269,60 @@ def migrate_db(conn, cursor):
             CREATE INDEX IF NOT EXISTS idx_ai_requests_timestamp ON ai_requests(timestamp)
         """
         )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ai_requests_user_timestamp ON ai_requests(user_id, timestamp)
+        """
+        )
         conn.commit()
     except:
+        pass
+    
+    # Migrazione: se la colonna timestamp è TEXT, la convertiamo in REAL
+    try:
+        cursor.execute("PRAGMA table_info(ai_requests)")
+        columns = cursor.fetchall()
+        timestamp_type = None
+        for col in columns:
+            if col[1] == 'timestamp':
+                timestamp_type = col[2]
+                break
+        
+        if timestamp_type == 'TEXT':
+            # Crea una tabella temporanea con il nuovo schema
+            cursor.execute("""
+                CREATE TABLE ai_requests_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    user_id TEXT NOT NULL,
+                    channel TEXT NOT NULL
+                )
+            """)
+            # Copia i dati convertendo i timestamp da ISO a Unix timestamp
+            cursor.execute("""
+                INSERT INTO ai_requests_new (id, timestamp, user_id, channel)
+                SELECT id, 
+                       CASE 
+                           WHEN timestamp LIKE '%-%-% %:%:%' THEN 
+                               (julianday(timestamp) - 2440587.5) * 86400.0
+                           ELSE 
+                               CAST(timestamp AS REAL)
+                       END,
+                       user_id, 
+                       channel
+                FROM ai_requests
+            """)
+            cursor.execute("DROP TABLE ai_requests")
+            cursor.execute("ALTER TABLE ai_requests_new RENAME TO ai_requests")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ai_requests_timestamp ON ai_requests(timestamp)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ai_requests_user_timestamp ON ai_requests(user_id, timestamp)
+            """)
+            conn.commit()
+    except Exception as e:
+        # Se la migrazione fallisce, continua (potrebbe essere già migrata o non esistere)
         pass
 
 
