@@ -558,6 +558,19 @@ def handle_message(message, say):
         logger.debug("[CLOWN] Skipping message: no text or from USLACKBOT")
         return
 
+    # Controlla se il bot è menzionato nel messaggio
+    bot_user_id = app._bot_user_id
+    text = message.get("text", "")
+    if bot_user_id and f"<@{bot_user_id}>" in text:
+        logger.info(f"[AI] Bot mentioned in message (via handle_message) by user {user_id}")
+        # Gestisci la menzione
+        try:
+            handle_app_mention(message, say)
+            return
+        except Exception as e:
+            logger.error(f"[AI] Error handling mention in handle_message: {e}")
+            logger.error(traceback.format_exc())
+
     conn, cursor = db_connect(database_path)
 
     # If it's a DM, treat it as a search query
@@ -766,16 +779,94 @@ def get_thread_messages(channel, thread_ts):
         return []
 
 
-@app.event("app_mention")
+def check_ai_throttle(conn, cursor, user_id, channel):
+    """Controlla se la richiesta rispetta i limiti di throttle.
+    Limiti: 1 messaggio al minuto, 10 messaggi ogni ora.
+    Ritorna (allowed, message, throttle_info) dove:
+    - allowed: True se permesso, False se throttled
+    - message: messaggio da inviare se throttled
+    - throttle_info: dict con info sul throttle per logging"""
+    now = datetime.now()
+    now_iso = now.isoformat()
+    one_minute_ago = (now - timedelta(minutes=1)).isoformat()
+    one_hour_ago = (now - timedelta(hours=1)).isoformat()
+    
+    # Conta richieste nell'ultimo minuto
+    cursor.execute(
+        "SELECT COUNT(*) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
+        (one_minute_ago, user_id)
+    )
+    requests_last_minute = cursor.fetchone()[0]
+    
+    # Conta richieste nell'ultima ora
+    cursor.execute(
+        "SELECT COUNT(*) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
+        (one_hour_ago, user_id)
+    )
+    requests_last_hour = cursor.fetchone()[0]
+    
+    throttle_info = {
+        "requests_last_minute": requests_last_minute,
+        "requests_last_hour": requests_last_hour,
+        "limit_per_minute": 1,
+        "limit_per_hour": 10
+    }
+    
+    # Controlla limiti
+    if requests_last_minute >= 1:
+        # Calcola quando sarà possibile inviare di nuovo (tra 1 minuto)
+        next_available = (now + timedelta(minutes=1)).strftime("%H:%M:%S")
+        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_minute} richiesta/e nell'ultimo minuto. Prova di nuovo dopo le {next_available}."
+        logger.warning(f"[AI] Throttle exceeded: {requests_last_minute} requests in last minute (limit: 1)")
+        return False, message, throttle_info
+    
+    if requests_last_hour >= 10:
+        # Calcola quando sarà possibile inviare di nuovo (tra 1 ora)
+        next_available = (now + timedelta(hours=1)).strftime("%H:%M:%S")
+        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_hour} richieste nell'ultima ora (limite: 10). Prova di nuovo dopo le {next_available}."
+        logger.warning(f"[AI] Throttle exceeded: {requests_last_hour} requests in last hour (limit: 10)")
+        return False, message, throttle_info
+    
+    # Registra la richiesta
+    cursor.execute(
+        "INSERT INTO ai_requests (timestamp, user_id, channel) VALUES (?, ?, ?)",
+        (now_iso, user_id, channel)
+    )
+    conn.commit()
+    
+    # Pulisci richieste vecchie (più di 1 ora)
+    cursor.execute("DELETE FROM ai_requests WHERE timestamp < ?", (one_hour_ago,))
+    conn.commit()
+    
+    logger.info(f"[AI] Throttle OK: {requests_last_minute}/1 per minuto, {requests_last_hour}/10 per ora")
+    return True, None, throttle_info
+
+
 def handle_app_mention(event, say):
-    """Gestisce le menzioni del bot in una conversazione."""
+    """Gestisce le menzioni del bot in una conversazione.
+    Può essere chiamata sia dall'evento app_mention che da handle_message."""
     try:
         channel = event.get("channel")
         thread_ts = event.get("ts")  # Timestamp del messaggio che menziona il bot
         text = event.get("text", "")
         user_id = event.get("user", "")
         
-        logger.info(f"[AI] Bot mentioned by user {user_id} in channel {channel}, thread_ts: {thread_ts}")
+        logger.info(f"[AI] Bot mentioned by user {user_id} in channel {channel}, thread_ts: {thread_ts}, text: '{text[:100]}...'")
+        
+        # Controlla throttle
+        conn, cursor = db_connect(database_path)
+        allowed, throttle_message, throttle_info = check_ai_throttle(conn, cursor, user_id, channel)
+        
+        logger.info(f"[AI] Throttle status: {throttle_info}")
+        
+        if not allowed:
+            # Determina thread_ts per la risposta
+            actual_thread_ts = event.get("thread_ts", thread_ts)
+            say(throttle_message, thread_ts=actual_thread_ts)
+            conn.close()
+            return
+        
+        conn.close()
         
         # Rimuovi la menzione del bot dal testo
         bot_user_id = app._bot_user_id
@@ -861,6 +952,13 @@ Rispondi basandoti sulla conversazione sopra."""
             say("Mi dispiace, c'è stato un errore nel processare la tua richiesta.", thread_ts=event.get("thread_ts", event.get("ts")))
         except:
             pass
+
+
+@app.event("app_mention")
+def handle_app_mention_event(event, say):
+    """Handler per l'evento app_mention da Slack."""
+    logger.info(f"[AI] Received app_mention event: {event}")
+    handle_app_mention(event, say)
 
 
 @app.event({"type": "message", "subtype": "thread_broadcast"})

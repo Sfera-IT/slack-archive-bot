@@ -252,6 +252,27 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Tabella per il throttle delle richieste AI (condivisa tra worker)
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                channel TEXT NOT NULL
+            )
+        """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ai_requests_timestamp ON ai_requests(timestamp)
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
 
 
 def db_connect(database_path):
