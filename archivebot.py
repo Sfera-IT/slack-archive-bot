@@ -781,7 +781,7 @@ def get_thread_messages(channel, thread_ts):
 
 def check_ai_throttle(conn, cursor, user_id, channel):
     """Controlla se la richiesta rispetta i limiti di throttle.
-    Limiti: 2 messaggi al minuto, 20 messaggi ogni ora.
+    Limiti: 2 messaggi al minuto, 10 messaggi ogni ora.
     Ritorna (allowed, message, throttle_info) dove:
     - allowed: True se permesso, False se throttled
     - message: messaggio da inviare se throttled
@@ -818,7 +818,7 @@ def check_ai_throttle(conn, cursor, user_id, channel):
         "requests_last_minute": requests_last_minute,
         "requests_last_hour": requests_last_hour,
         "limit_per_minute": 2,
-        "limit_per_hour": 20,
+        "limit_per_hour": 10,
         "one_hour_ago_timestamp": one_hour_ago_timestamp,
         "now_timestamp": now_timestamp
     }
@@ -831,11 +831,11 @@ def check_ai_throttle(conn, cursor, user_id, channel):
         logger.warning(f"[AI] Throttle exceeded: {requests_last_minute} requests in last minute (limit: 2)")
         return False, message, throttle_info
     
-    if requests_last_hour >= 20:
+    if requests_last_hour >= 10:
         # Calcola quando sarà possibile inviare di nuovo (tra 1 ora)
         next_available = (now + timedelta(hours=1)).strftime("%H:%M:%S")
-        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_hour} richieste nell'ultima ora (limite: 20). Prova di nuovo dopo le {next_available}."
-        logger.warning(f"[AI] Throttle exceeded: {requests_last_hour} requests in last hour (limit: 20)")
+        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_hour} richieste nell'ultima ora (limite: 10). Prova di nuovo dopo le {next_available}."
+        logger.warning(f"[AI] Throttle exceeded: {requests_last_hour} requests in last hour (limit: 10)")
         return False, message, throttle_info
     
     # Registra la richiesta con timestamp Unix
@@ -845,7 +845,7 @@ def check_ai_throttle(conn, cursor, user_id, channel):
     )
     conn.commit()
     
-    logger.info(f"[AI] Throttle OK: {requests_last_minute}/2 per minuto, {requests_last_hour}/20 per ora (now_ts: {now_timestamp:.2f}, one_hour_ago_ts: {one_hour_ago_timestamp:.2f})")
+    logger.info(f"[AI] Throttle OK: {requests_last_minute}/2 per minuto, {requests_last_hour}/10 per ora (now_ts: {now_timestamp:.2f}, one_hour_ago_ts: {one_hour_ago_timestamp:.2f})")
     return True, None, throttle_info
 
 
@@ -970,10 +970,10 @@ Rispondi basandoti sulla conversazione sopra."""
         conn_throttle.close()
         
         # Aggiungi la riga con i rate limit alla risposta
-        rate_limit_info = f"\n\n_📊 Rate limit: {current_minute_count}/2 al minuto, {current_hour_count}/20 all'ora_"
+        rate_limit_info = f"\n\n_📊 Rate limit per user: {current_minute_count}/2 al minuto, {current_hour_count}/10 all'ora_"
         final_response = ai_response + rate_limit_info
         
-        logger.info(f"[AI] Added rate limit info: {current_minute_count}/2 per minuto, {current_hour_count}/20 per ora")
+        logger.info(f"[AI] Added rate limit info: {current_minute_count}/2 per minuto, {current_hour_count}/10 per ora")
         
         # Rispondi nel thread
         say(final_response, thread_ts=actual_thread_ts)
