@@ -312,9 +312,11 @@ def post_xcancel_alternatives(message, say):
     """Se il messaggio contiene link a x.com, posta le alternative xcancel.com nel thread."""
     text = message.get("text", "")
     if not text:
+        logger.debug("[XCANCEL] No text in message, skipping")
         return
     
     urls = extract_urls(text)
+    logger.debug(f"[XCANCEL] Extracted URLs: {urls}")
     if not urls:
         return
     
@@ -324,14 +326,17 @@ def post_xcancel_alternatives(message, say):
     xcancel_links = []
     for url in urls:
         match = x_pattern.match(url)
+        logger.debug(f"[XCANCEL] Checking URL '{url}': match={match is not None}")
         if match:
             path = match.group(1)
             xcancel_url = f"https://xcancel.com/{path}"
             # Controlla che l'utente non abbia già postato il link xcancel
             if xcancel_url.lower() not in text.lower():
                 xcancel_links.append(xcancel_url)
+                logger.debug(f"[XCANCEL] Added xcancel link: {xcancel_url}")
     
     if not xcancel_links:
+        logger.debug("[XCANCEL] No x.com links found, skipping")
         return
     
     # Costruisci il messaggio
@@ -343,11 +348,13 @@ def post_xcancel_alternatives(message, say):
     
     # Posta nel thread (usa thread_ts se esiste, altrimenti ts del messaggio)
     thread_ts = message.get("thread_ts", message.get("ts"))
+    logger.info(f"[XCANCEL] Posting response in thread {thread_ts}: {response_text}")
     try:
         say(text=response_text, thread_ts=thread_ts)
-        logger.info(f"Posted xcancel alternatives for {len(xcancel_links)} x.com link(s)")
+        logger.info(f"[XCANCEL] Successfully posted xcancel alternatives for {len(xcancel_links)} x.com link(s)")
     except Exception as e:
-        logger.error(f"Error posting xcancel alternative: {e}")
+        logger.error(f"[XCANCEL] Error posting xcancel alternative: {e}")
+        logger.error(traceback.format_exc())
 
 
 def check_and_store_links(message, permalink_dict, say):
@@ -669,7 +676,11 @@ def handle_message(message, say):
         check_and_store_links(original_message, permalink, say)
         
         # Post xcancel.com alternatives for any x.com links
-        post_xcancel_alternatives(original_message, say)
+        try:
+            post_xcancel_alternatives(original_message, say)
+        except Exception as e:
+            logger.error(f"Error in post_xcancel_alternatives: {e}")
+            logger.error(traceback.format_exc())
 
         # Ensure that the user exists in the DB
         conn, cursor = db_connect(database_path)
