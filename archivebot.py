@@ -308,48 +308,6 @@ def normalize_url(url):
         return url
 
 
-def post_xcancel_alternatives(message, say):
-    """Se il messaggio contiene link a x.com, posta le alternative xcancel.com nel thread."""
-    text = message.get("text", "")
-    if not text:
-        return
-    
-    urls = extract_urls(text)
-    if not urls:
-        return
-    
-    # Regex per matchare x.com (con o senza www)
-    x_pattern = re.compile(r'^https?://(?:www\.)?x\.com/(.+)$', re.IGNORECASE)
-    
-    xcancel_links = []
-    for url in urls:
-        match = x_pattern.match(url)
-        if match:
-            path = match.group(1)
-            xcancel_url = f"https://xcancel.com/{path}"
-            # Controlla che l'utente non abbia già postato il link xcancel
-            if xcancel_url.lower() not in text.lower():
-                xcancel_links.append(xcancel_url)
-    
-    if not xcancel_links:
-        return
-    
-    # Costruisci il messaggio
-    if len(xcancel_links) == 1:
-        response_text = f"🔗 Link senza Shitler: {xcancel_links[0]}"
-    else:
-        links_formatted = "\n".join(f"• {link}" for link in xcancel_links)
-        response_text = f"🔗 Link senza Shitler:\n{links_formatted}"
-    
-    # Posta nel thread (usa thread_ts se esiste, altrimenti ts del messaggio)
-    thread_ts = message.get("thread_ts", message.get("ts"))
-    try:
-        say(text=response_text, thread_ts=thread_ts)
-        logger.info(f"Posted xcancel alternatives for {len(xcancel_links)} x.com link(s)")
-    except Exception as e:
-        logger.error(f"Error posting xcancel alternative: {e}")
-
-
 def check_and_store_links(message, permalink_dict, say):
     """Controlla se ci sono link nel messaggio e verifica duplicati.
     Il controllo viene fatto solo sui messaggi principali, non sulle risposte nei thread."""
@@ -667,9 +625,6 @@ def handle_message(message, say):
         original_message["text"] = original_text
         original_message["user"] = original_user
         check_and_store_links(original_message, permalink, say)
-        
-        # Post xcancel.com alternatives for any x.com links
-        post_xcancel_alternatives(original_message, say)
 
         # Ensure that the user exists in the DB
         conn, cursor = db_connect(database_path)
