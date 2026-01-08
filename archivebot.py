@@ -957,9 +957,9 @@ def handle_app_mention(event, say):
         ])
         
         # Prepara il prompt per ChatGPT
-        system_prompt = """Sei un assistente utile che risponde alle domande basandoti sulle conversazioni di Slack che ti vengono fornite. 
+        system_prompt = """Sei un assistente utile che assiste gli utenti nelle loro richieste e conversazioni slack, e quando richiesto risponde alle domande basandosi sul contesto della conversazione di Slack viene fornita. 
 Rispondi sempre in italiano, in modo chiaro e conciso. 
-Se la domanda non può essere risposta basandoti sulla conversazione fornita, dillo chiaramente, ma rispondi comunque in base alla tua conoscenza (ripeto, specificandolo chiaramente)."""
+Se la domanda non può essere risposta basandosi sulla conversazione fornita, dillo chiaramente, ma rispondi comunque in base alla tua conoscenza (ripeto, specificandolo chiaramente) e assisti l'utente nelle sue richieste"""
         
         user_prompt = f"""Ecco la conversazione completa:
 
