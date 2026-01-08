@@ -321,7 +321,7 @@ def post_xcancel_alternatives(message, say):
     # Regex per matchare x.com (con o senza www)
     x_pattern = re.compile(r'^https?://(?:www\.)?x\.com/(.+)$', re.IGNORECASE)
     
-    xcancel_links = []
+    xcancel_links = set()  # Usa set per deduplicare automaticamente
     for url in urls:
         match = x_pattern.match(url)
         if match:
@@ -329,12 +329,13 @@ def post_xcancel_alternatives(message, say):
             xcancel_url = f"https://xcancel.com/{path}"
             # Controlla che l'utente non abbia già postato il link xcancel
             if xcancel_url.lower() not in text.lower():
-                xcancel_links.append(xcancel_url)
+                xcancel_links.add(xcancel_url)
     
     if not xcancel_links:
         return
     
     # Costruisci il messaggio
+    xcancel_links = list(xcancel_links)  # Converti a lista per formattazione
     if len(xcancel_links) == 1:
         response_text = f"🔗 Link senza Shitler: {xcancel_links[0]}"
     else:
