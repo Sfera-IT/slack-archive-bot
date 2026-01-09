@@ -23,7 +23,7 @@ sentence-transformers==2.2.2
 slack-bolt==1.18.0
 timedelta==2020.12.3
 torch==2.8.0
-urllib3==2.5.0
+urllib3==2.6.3
 watchdog==4.0.1
 werkzeug==3.1.4
 pytest==8.3.3
