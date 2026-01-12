@@ -2,11 +2,8 @@ import argparse
 import logging
 import os
 import traceback
-import shlex
 from sentence_transformers import SentenceTransformer
-import numpy as np
 import re
-from urllib.parse import urlparse, urlunparse
 from datetime import datetime, timedelta
 
 from slack_bolt import App
@@ -14,6 +11,22 @@ from openai import OpenAI
 
 from utils import db_connect, migrate_db
 from url_cleaner import UrlCleaner
+
+# Pre-compiled regex patterns
+_X_COM_PATTERN = re.compile(r'^https?://(?:www\.)?x\.com/(.+)$', re.IGNORECASE)
+
+# Lazy-loaded SentenceTransformer model (loaded once on first use)
+_sentence_transformer_model = None
+
+
+def _get_sentence_transformer():
+    """Get or initialize the SentenceTransformer model (lazy loading)."""
+    global _sentence_transformer_model
+    if _sentence_transformer_model is None:
+        logger.info("Loading SentenceTransformer model (one-time initialization)...")
+        _sentence_transformer_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
+        logger.info("SentenceTransformer model loaded successfully")
+    return _sentence_transformer_model
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -91,9 +104,10 @@ def update_users(conn, cursor):
 
 def create_embeddings(message):
     try:
-        model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
+        model = _get_sentence_transformer()
         embeddings = model.encode(message)
-    except:
+    except Exception as e:
+        logger.warning(f"Error creating embeddings: {e}")
         embeddings = ""
     return embeddings
 
@@ -318,12 +332,9 @@ def post_xcancel_alternatives(message, say):
     if not urls:
         return
     
-    # Regex per matchare x.com (con o senza www)
-    x_pattern = re.compile(r'^https?://(?:www\.)?x\.com/(.+)$', re.IGNORECASE)
-    
-    xcancel_links = set()  # Usa set per deduplicare automaticamente
+    xcancel_links = set()  # Use set to deduplicate
     for url in urls:
-        match = x_pattern.match(url)
+        match = _X_COM_PATTERN.match(url)
         if match:
             path = match.group(1)
             xcancel_url = f"https://xcancel.com/{path}"
@@ -335,11 +346,11 @@ def post_xcancel_alternatives(message, say):
         return
     
     # Costruisci il messaggio
-    xcancel_links = list(xcancel_links)  # Converti a lista per formattazione
-    if len(xcancel_links) == 1:
-        response_text = f"🔗 Link senza Shitler: {xcancel_links[0]}"
+    xcancel_list = list(xcancel_links)
+    if len(xcancel_list) == 1:
+        response_text = f"🔗 Link senza Shitler: {xcancel_list[0]}"
     else:
-        links_formatted = "\n".join(f"• {link}" for link in xcancel_links)
+        links_formatted = "\n".join(f"• {link}" for link in xcancel_list)
         response_text = f"🔗 Link senza Shitler:\n{links_formatted}"
     
     # Posta nel thread (usa thread_ts se esiste, altrimenti ts del messaggio)
@@ -516,43 +527,50 @@ def check_and_store_links(message, permalink_dict, say):
 @app.event("member_joined_channel")
 def handle_join(event):
     conn, cursor = db_connect(database_path)
-
-    # If the user added is archive bot, then add the channel too
-    if event["user"] == app._bot_user_id:
-        channel_id, channel_name, channel_is_private, members = get_channel_info(
-            event["channel"]
-        )
-        cursor.execute(
-            "INSERT INTO channels(name, id, is_private) VALUES(?,?,?)",
-            (channel_name, channel_id, channel_is_private),
-        )
-        cursor.executemany("INSERT INTO members(channel, user) VALUES(?,?)", members)
-    else:
-        cursor.execute(
-            "INSERT INTO members(channel, user) VALUES(?,?)",
-            (event["channel"], event["user"]),
-        )
-
-    conn.commit()
+    try:
+        # If the user added is archive bot, then add the channel too
+        if event["user"] == app._bot_user_id:
+            channel_id, channel_name, channel_is_private, members = get_channel_info(
+                event["channel"]
+            )
+            cursor.execute(
+                "INSERT INTO channels(name, id, is_private) VALUES(?,?,?)",
+                (channel_name, channel_id, channel_is_private),
+            )
+            cursor.executemany("INSERT INTO members(channel, user) VALUES(?,?)", members)
+        else:
+            cursor.execute(
+                "INSERT INTO members(channel, user) VALUES(?,?)",
+                (event["channel"], event["user"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @app.event("member_left_channel")
 def handle_left(event):
     conn, cursor = db_connect(database_path)
-    cursor.execute(
-        "DELETE FROM members WHERE channel = ? AND user = ?",
-        (event["channel"], event["user"]),
-    )
-    conn.commit()
+    try:
+        cursor.execute(
+            "DELETE FROM members WHERE channel = ? AND user = ?",
+            (event["channel"], event["user"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def handle_rename(event):
     channel = event["channel"]
     conn, cursor = db_connect(database_path)
-    cursor.execute(
-        "UPDATE channels SET name = ? WHERE id = ?", (channel["name"], channel["id"])
-    )
-    conn.commit()
+    try:
+        cursor.execute(
+            "UPDATE channels SET name = ? WHERE id = ?", (channel["name"], channel["id"])
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @app.event("channel_rename")
@@ -585,8 +603,11 @@ def handle_user_change(event):
         new_username = event["user"]["profile"]["real_name"]
 
     conn, cursor = db_connect(database_path)
-    cursor.execute("UPDATE users SET name = ? WHERE id = ?", (new_username, user_id))
-    conn.commit()
+    try:
+        cursor.execute("UPDATE users SET name = ? WHERE id = ?", (new_username, user_id))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def handle_message(message, say):
@@ -1049,11 +1070,14 @@ def handle_message_thread_broadcast(event, say):
 def handle_message_changed(event):
     message = event["message"]
     conn, cursor = db_connect(database_path)
-    cursor.execute(
-        "UPDATE messages SET message = ? WHERE user = ? AND channel = ? AND timestamp = ?",
-        (message["text"], message["user"], event["channel"], message["ts"]),
-    )
-    conn.commit()
+    try:
+        cursor.execute(
+            "UPDATE messages SET message = ? WHERE user = ? AND channel = ? AND timestamp = ?",
+            (message["text"], message["user"], event["channel"], message["ts"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @app.event({"type": "message", "subtype": "message_deleted"})
