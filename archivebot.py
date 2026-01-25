@@ -1081,7 +1081,18 @@ def handle_message_thread_broadcast(event, say):
 
 @app.event({"type": "message", "subtype": "message_changed"})
 def handle_message_changed(event):
-    message = event["message"]
+    message = event.get("message", {})
+
+    # Slack a volte invia message_changed quando un messaggio viene cancellato
+    # In questo caso, il messaggio ha subtype "tombstone" o non ha "text"
+    if message.get("subtype") == "tombstone" or "text" not in message:
+        # Tratta come cancellazione
+        deleted_ts = event.get("previous_message", {}).get("ts") or message.get("ts")
+        if deleted_ts:
+            logger.info(f"MESSAGE_CHANGED_AS_DELETED: Detected deletion via message_changed, ts={deleted_ts}")
+            handle_message_deleted_logic(deleted_ts, event.get("channel"))
+        return
+
     conn, cursor = db_connect(database_path)
     try:
         cursor.execute(
@@ -1093,18 +1104,14 @@ def handle_message_changed(event):
         conn.close()
 
 
-@app.event({"type": "message", "subtype": "message_deleted"})
-def handle_message_deleted(event):
-    """Gestisce la cancellazione di un messaggio e rimuove i link associati dalla tabella posted_links."""
-    deleted_ts = event.get("deleted_ts")
-    channel = event.get("channel")
-    
+def handle_message_deleted_logic(deleted_ts, channel):
+    """Logica comune per gestire la cancellazione di un messaggio."""
     if not deleted_ts:
-        logger.warning("MESSAGE_DELETED: No deleted_ts in event, skipping link cleanup")
+        logger.warning("MESSAGE_DELETED: No deleted_ts provided, skipping cleanup")
         return
-    
+
     conn, cursor = db_connect(database_path)
-    
+
     try:
         # Cerca tutti i link associati a questo messaggio
         cursor.execute(
@@ -1115,9 +1122,9 @@ def handle_message_deleted(event):
             """,
             (deleted_ts,)
         )
-        
+
         deleted_links = cursor.fetchall()
-        
+
         if deleted_links:
             # Rimuovi i link dalla tabella
             cursor.execute(
@@ -1128,7 +1135,7 @@ def handle_message_deleted(event):
                 (deleted_ts,)
             )
             conn.commit()
-            
+
             # Logging dettagliato
             logger.info(
                 f"MESSAGE_DELETED_LINKS_REMOVED: deleted_ts='{deleted_ts}' "
@@ -1136,7 +1143,7 @@ def handle_message_deleted(event):
                 f"links_count={len(deleted_links)} "
                 f"links={[(link[0], link[1]) for link in deleted_links]}"
             )
-            
+
             # Log dettagliato per ogni link rimosso
             for link in deleted_links:
                 logger.debug(
@@ -1176,6 +1183,14 @@ def handle_message_deleted(event):
         conn.rollback()
     finally:
         conn.close()
+
+
+@app.event({"type": "message", "subtype": "message_deleted"})
+def handle_message_deleted(event):
+    """Gestisce la cancellazione di un messaggio via evento message_deleted."""
+    deleted_ts = event.get("deleted_ts")
+    channel = event.get("channel")
+    handle_message_deleted_logic(deleted_ts, channel)
 
 
 @app.event("channel_created")
