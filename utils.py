@@ -278,6 +278,22 @@ def migrate_db(conn, cursor):
     except:
         pass
     
+    # Tabella per tracciare gli alert di link duplicati (per cancellarli se il messaggio parent viene cancellato)
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS duplicate_alerts (
+                parent_message_ts TEXT NOT NULL,
+                alert_message_ts TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                PRIMARY KEY (parent_message_ts, channel)
+            )
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
     # Migrazione: se la colonna timestamp è TEXT, la convertiamo in REAL
     try:
         cursor.execute("PRAGMA table_info(ai_requests)")

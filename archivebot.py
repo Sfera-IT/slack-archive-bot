@@ -451,18 +451,30 @@ def check_and_store_links(message, permalink_dict, say):
                 # Notifica solo se non è già stato notificato
                 if not already_notified:
                     response_text = f"Ciao {user_display_name}, questo link è stato già postato e lo trovi qui: {original_permalink}"
-                    
+
                     try:
                         # Rispondi nel thread se il messaggio è parte di un thread, altrimenti come risposta normale
                         if "thread_ts" in message:
                             # Se è già un thread, rispondi nello stesso thread
-                            say(text=response_text, thread_ts=message["thread_ts"])
+                            result = say(text=response_text, thread_ts=message["thread_ts"])
+                            parent_ts = message["thread_ts"]
                             logger.debug(f"Sent duplicate notification in existing thread: {message.get('thread_ts')}")
                         else:
                             # Se non è un thread, crea una risposta nel thread del messaggio originale
-                            say(text=response_text, thread_ts=message["ts"])
+                            result = say(text=response_text, thread_ts=message["ts"])
+                            parent_ts = message["ts"]
                             logger.debug(f"Sent duplicate notification in new thread: {message.get('ts')}")
-                        
+
+                        # Salva il timestamp dell'alert per poterlo cancellare se il messaggio parent viene cancellato
+                        alert_ts = result.get("ts") if result else None
+                        if alert_ts:
+                            cursor.execute(
+                                "INSERT OR REPLACE INTO duplicate_alerts (parent_message_ts, alert_message_ts, channel) VALUES (?, ?, ?)",
+                                (parent_ts, alert_ts, message["channel"])
+                            )
+                            conn.commit()
+                            logger.debug(f"Saved duplicate alert reference: parent_ts={parent_ts}, alert_ts={alert_ts}")
+
                         # Aggiorna il flag duplicate_notified per il link trovato
                         cursor.execute(
                             """
@@ -1139,7 +1151,26 @@ def handle_message_deleted(event):
                 f"MESSAGE_DELETED_NO_LINKS: deleted_ts='{deleted_ts}' "
                 f"channel='{channel}' - No links found for this message"
             )
-            
+
+        # Cerca e cancella eventuali alert di link duplicati associati a questo messaggio
+        cursor.execute(
+            "SELECT alert_message_ts, channel FROM duplicate_alerts WHERE parent_message_ts = ?",
+            (deleted_ts,)
+        )
+        alert = cursor.fetchone()
+
+        if alert:
+            alert_ts, alert_channel = alert
+            try:
+                app.client.chat_delete(channel=alert_channel, ts=alert_ts)
+                logger.info(f"DUPLICATE_ALERT_DELETED: Deleted orphaned duplicate alert: alert_ts='{alert_ts}' channel='{alert_channel}'")
+            except Exception as e:
+                logger.warning(f"Could not delete duplicate alert {alert_ts}: {e}")
+
+            # Rimuovi dalla tabella duplicate_alerts
+            cursor.execute("DELETE FROM duplicate_alerts WHERE parent_message_ts = ?", (deleted_ts,))
+            conn.commit()
+
     except Exception as e:
         logger.error(f"Error handling message deletion for ts={deleted_ts}: {e}")
         conn.rollback()
