@@ -1188,8 +1188,10 @@ def handle_message_deleted_logic(deleted_ts, channel):
 @app.event({"type": "message", "subtype": "message_deleted"})
 def handle_message_deleted(event):
     """Gestisce la cancellazione di un messaggio via evento message_deleted."""
-    deleted_ts = event.get("deleted_ts")
+    # deleted_ts può essere direttamente nell'evento o in previous_message.ts
+    deleted_ts = event.get("deleted_ts") or event.get("previous_message", {}).get("ts")
     channel = event.get("channel")
+    logger.info(f"MESSAGE_DELETED_EVENT: deleted_ts={deleted_ts}, channel={channel}")
     handle_message_deleted_logic(deleted_ts, channel)
 
 
