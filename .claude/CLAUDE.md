@@ -429,3 +429,78 @@ Migrations run automatically on startup via `gunicorn_conf.py` or `utils.init()`
 1. Ensure sufficient RAM (2GB+)
 2. Check PyTorch installation
 3. Run `utilities/test_embeddings.py`
+
+---
+
+## Git Workflow
+
+### Commit, Push e Tagging
+
+Quando viene richiesto di pubblicare una nuova versione, eseguire:
+
+```bash
+# 1. Commit delle modifiche
+git add <files>
+git commit -m "$(cat <<'EOF'
+<type>: <descrizione breve>
+
+<descrizione dettagliata se necessaria>
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+EOF
+)"
+
+# 2. Push su master
+git push origin master
+
+# 3. Creare e pushare il tag
+git tag v1.x.x
+git push origin v1.x.x
+```
+
+### Convenzioni Commit Message
+
+| Tipo | Uso |
+|------|-----|
+| `feat:` | Nuova funzionalità |
+| `fix:` | Bug fix |
+| `chore:` | Manutenzione, cleanup |
+| `refactor:` | Refactoring senza cambi funzionali |
+| `docs:` | Documentazione |
+| `test:` | Test |
+
+### Versioning
+
+Il progetto usa **Semantic Versioning** (`v1.MAJOR.MINOR`):
+- Incrementare il numero dopo l'ultimo punto per ogni release
+- Verificare l'ultimo tag con: `git tag --sort=-v:refname | head -1`
+
+### Esempio Completo
+
+```bash
+# Verifica ultimo tag
+git tag --sort=-v:refname | head -1
+# Output: v1.2.34
+
+# Commit e push
+git add archivebot.py utils.py
+git commit -m "$(cat <<'EOF'
+feat: add new feature description
+
+Detailed explanation of the changes.
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
+EOF
+)"
+git push origin master
+
+# Nuovo tag (incrementa da v1.2.34 a v1.2.35)
+git tag v1.2.35
+git push origin v1.2.35
+```
+
+### Note Importanti
+
+- **Mai pushare su branch protetti senza permesso** (il repo bypassa le regole per admin)
+- **Includere sempre il Co-Authored-By** per tracciare i contributi di Claude
+- **Usare HEREDOC** per commit message multilinea (evita problemi con caratteri speciali)
