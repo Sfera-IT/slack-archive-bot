@@ -15,6 +15,18 @@ from url_cleaner import UrlCleaner
 # Pre-compiled regex patterns
 _X_COM_PATTERN = re.compile(r'^https?://(?:www\.)?x\.com/(.+)$', re.IGNORECASE)
 
+# Admin users che possono eseguire comandi privilegiati (stessa lista di flask_app.py)
+ADMIN_USERS = [
+    'U011PQ7RHRT',
+    'U011MV24J2W',
+    'U0129HFHRJ4',
+    'U011N8WRRD0',
+    'U011Z26G449',
+    'U011CKQ7D71',
+    'U011KE4BF0W',
+    'U011PN35BHT'
+]
+
 # Lazy-loaded SentenceTransformer model (loaded once on first use)
 _sentence_transformer_model = None
 
@@ -246,7 +258,64 @@ def handle_query(event, cursor, say):
             logger.warning("[CLOWN] /clownremove command without nickname")
             say("❌ Devi specificare un nickname. Uso: /clownremove nickname")
         return
-    
+
+    # Gestisci comando /optout <user_id> (solo admin)
+    if text.startswith("/optout "):
+        target_user_id = text[8:].strip()  # Rimuovi "/optout " e spazi
+        # Rimuovi eventuali caratteri di menzione Slack <@U...>
+        if target_user_id.startswith("<@") and target_user_id.endswith(">"):
+            target_user_id = target_user_id[2:-1]
+            # Rimuovi eventuale |nome dopo l'ID
+            if "|" in target_user_id:
+                target_user_id = target_user_id.split("|")[0]
+
+        logger.info(f"[OPTOUT] Processing /optout command from {user_id} for target: '{target_user_id}'")
+
+        # Verifica che l'utente sia admin
+        if user_id not in ADMIN_USERS:
+            logger.warning(f"[OPTOUT] Non-admin user {user_id} attempted to use /optout command")
+            say("❌ Solo gli amministratori possono eseguire l'opt-out per altri utenti.")
+            return
+
+        if not target_user_id:
+            say("❌ Devi specificare un user ID. Uso: /optout <user_id> oppure /optout @utente")
+            return
+
+        # Verifica che l'utente target esista
+        cursor.execute("SELECT id, name FROM users WHERE id = ?", (target_user_id,))
+        target_user = cursor.fetchone()
+        if not target_user:
+            say(f"❌ Utente con ID {target_user_id} non trovato nel database.")
+            return
+
+        target_name = target_user[1] if target_user else target_user_id
+
+        # Verifica se è già in opt-out
+        cursor.execute("SELECT user FROM optout WHERE user = ?", (target_user_id,))
+        already_opted_out = cursor.fetchone()
+        if already_opted_out:
+            say(f"ℹ️ L'utente {target_name} ({target_user_id}) è già in opt-out.")
+            return
+
+        # Esegui l'opt-out
+        try:
+            cursor.execute(
+                "INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)",
+                (target_user_id,)
+            )
+            cursor.execute(
+                'UPDATE messages SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?',
+                (target_user_id,)
+            )
+            cursor.connection.commit()
+            logger.info(f"[OPTOUT] Admin {user_id} executed opt-out for user {target_user_id} ({target_name})")
+            say(f"✅ Opt-out eseguito per l'utente {target_name} ({target_user_id}). Tutti i suoi messaggi sono stati anonimizzati.")
+        except Exception as e:
+            logger.error(f"[OPTOUT] Error executing opt-out for {target_user_id}: {e}")
+            cursor.connection.rollback()
+            say(f"❌ Errore durante l'opt-out: {e}")
+        return
+
     # Comportamento di default per altri messaggi
     logger.debug(f"[CLOWN] DM not a clown command, using default response")
     say("Questa interfaccia è stata disattivata. Ora puoi andare qui: https://sferaarchive-client.vercel.app/")
