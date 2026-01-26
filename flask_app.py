@@ -8,6 +8,10 @@ from slack_bolt.adapter.flask import SlackRequestHandler
 from archivebot import app, update_users
 handler = SlackRequestHandler(app)
 import datetime
+import logging
+import uuid
+
+logger = logging.getLogger(__name__)
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import openai
@@ -100,6 +104,14 @@ def apply_cors_headers(response):
 def get_response(data):
     response = jsonify(data)
     return response
+
+
+def log_and_return_error(e: Exception, status_code: int = 500):
+    """Log exception with error ID and return generic error response."""
+    error_id = uuid.uuid4().hex[:8]
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    logger.error(f"[ERROR:{error_id}] {timestamp} - {type(e).__name__}: {e}")
+    return get_response({'error': f'Internal error [{error_id}] at {timestamp}'}), status_code
 
 
 def get_db_connection():
@@ -248,10 +260,9 @@ def optout():
         )
 
     except Exception as e:
-        # return the exception as an error
         if conn:
             conn.rollback()
-        return get_response({'error': str(e)})
+        return log_and_return_error(e)
     finally:
         if cursor:
             cursor.close()
@@ -730,7 +741,7 @@ def generate_digest():
             if not response['ok']:
                 return get_response({'status': 'error', 'message': 'Failed to send digest to channel'})
         except Exception as e:
-            return get_response({'status': 'error', 'message': f'Error sending digest to channel: {str(e)}'})
+            return log_and_return_error(e)
 
     return get_response({'status': 'success', 'digest': summary, 'period': period})
 
@@ -826,10 +837,9 @@ def optout_ai():
         conn.commit()
 
     except Exception as e:
-        # return the exception as an error
         if conn:
             conn.rollback()
-        return get_response({'error': str(e)})
+        return log_and_return_error(e)
     finally:
         if cursor:
             cursor.close()
@@ -853,7 +863,7 @@ def get_link():
         else:
             return jsonify({'error': 'Message not found'}), 404
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return log_and_return_error(e)
     finally:
         conn.close()
 
