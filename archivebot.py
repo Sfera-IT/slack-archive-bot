@@ -11,6 +11,12 @@ from openai import OpenAI
 
 from utils import db_connect, migrate_db
 from url_cleaner import UrlCleaner
+from sferait_context import (
+    SFERAIT_SYSTEM_PROMPT,
+    get_recent_messages,
+    search_archive,
+    build_enhanced_prompt
+)
 
 # Pre-compiled regex patterns
 _X_COM_PATTERN = re.compile(r'^https?://(?:www\.)?x\.com/(.+)$', re.IGNORECASE)
@@ -1059,19 +1065,32 @@ def handle_app_mention(event, say):
             f"{msg['user']}: {msg['text']}" for msg in thread_messages
         ])
         
-        # Prepara il prompt per ChatGPT
-        system_prompt = """Sei un assistente utile che assiste gli utenti nelle loro richieste e conversazioni slack, e quando richiesto risponde alle domande basandosi sul contesto della conversazione di Slack viene fornita. 
-Rispondi sempre in italiano, in modo chiaro e conciso. 
-Rispondi all'utente chiamandolo per nome, se disponibile. L'utente è quello che ti ha fatto la Domanda.
-Se la domanda non può essere risposta basandosi sulla conversazione fornita, dillo chiaramente, ma rispondi comunque in base alla tua conoscenza (ripeto, specificandolo chiaramente) e assisti l'utente nelle sue richieste"""
+        # === CONTESTO POTENZIATO SFERAIT ===
+        # 1. Recupera messaggi recenti per catturare lo "stile" della community
+        conn_ctx, cursor_ctx = db_connect(database_path)
+        recent_context = get_recent_messages(
+            conn_ctx, cursor_ctx, 
+            limit=30, 
+            exclude_channel=channel, 
+            hours=48
+        )
+        logger.info(f"[AI] Retrieved {len(recent_context)} recent messages for ambient context")
         
-        user_prompt = f"""Ecco la conversazione completa:
-
-{formatted_messages}
-
-Domanda: {text}
-
-Rispondi basandoti sulla conversazione sopra."""
+        # 2. Cerca nell'archivio messaggi rilevanti alla domanda
+        archive_results = search_archive(conn_ctx, cursor_ctx, text, limit=5)
+        logger.info(f"[AI] Found {len(archive_results)} relevant archive messages")
+        conn_ctx.close()
+        
+        # 3. Usa il system prompt SferaIT
+        system_prompt = SFERAIT_SYSTEM_PROMPT
+        
+        # 4. Costruisci prompt arricchito
+        user_prompt = build_enhanced_prompt(
+            thread_messages=formatted_messages,
+            user_question=text,
+            recent_context=recent_context,
+            archive_results=archive_results
+        )
         
         # Chiama ChatGPT
         openai_api_key = os.environ.get("OPENAI_API_KEY")
