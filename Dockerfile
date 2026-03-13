@@ -13,10 +13,12 @@ RUN apt-get update && apt-get install -y \
     pkg-config && \
     rm -rf /var/lib/apt/lists/*
 
+# Installa dipendenze Python PRIMA di copiare il codice (cache layer)
 COPY requirements.txt ./
-# remove cuda stuff for size optimization
-RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
+# Copia il resto del codice (layer separato, cambia più spesso)
 COPY . .
 
 # Fase 2: Esecuzione
@@ -32,9 +34,9 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /usr/src/app /usr/src/app
 COPY --from=build /usr/local/lib/python${PY_BUILD_VERS}/site-packages /usr/local/lib/python${PY_BUILD_VERS}/site-packages
 COPY --from=build /usr/local/bin/gunicorn /usr/local/bin/gunicorn
+COPY --from=build /usr/src/app /usr/src/app
 
 VOLUME /data
 ENV DB_NAME=slack.sqlite
