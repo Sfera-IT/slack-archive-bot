@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from slack_bolt import App
 from openai import OpenAI
 
+from ai_context import format_messages_for_prompt, get_ai_context_scope
 from utils import db_connect, migrate_db
 from url_cleaner import UrlCleaner
 from sferait_context import (
@@ -80,6 +81,8 @@ app = App(
     signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
     logger=logger,
 )
+
+CHANNEL_RECAP_MESSAGE_LIMIT = 1000
 
 # URL cleaner instance loading local rules
 _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "url_rules.json"))
@@ -880,13 +883,12 @@ def handle_message_default(message, say):
 def get_thread_messages(channel, thread_ts):
     """Recupera tutti i messaggi di un thread."""
     try:
-        all_messages = []
         cursor = None
-        
+
         # Usa conversations_replies per recuperare tutti i messaggi del thread
         response = app.client.conversations_replies(channel=channel, ts=thread_ts)
         messages = response.get("messages", [])
-        
+
         # Continua a recuperare se ci sono più pagine
         while response.get("has_more", False):
             cursor = response.get("response_metadata", {}).get("next_cursor")
@@ -896,41 +898,108 @@ def get_thread_messages(channel, thread_ts):
                 channel=channel, ts=thread_ts, cursor=cursor
             )
             messages.extend(response.get("messages", []))
-        
+
         # Ordina i messaggi per timestamp
         messages.sort(key=lambda x: float(x.get("ts", 0)))
-        
-        # Recupera i nomi utente dal database
-        conn, db_cursor = db_connect(database_path)
-        
-        for msg in messages:
-            user_id = msg.get("user", "")
-            if not user_id or user_id == "USLACKBOT":
-                continue
-            
-            # Recupera il nome utente dal database
-            db_cursor.execute("SELECT name, display_name, real_name FROM users WHERE id = ?", (user_id,))
-            user_row = db_cursor.fetchone()
-            
-            if user_row:
-                # Usa display_name, poi name, poi real_name
-                user_name = user_row[1] if user_row[1] else (user_row[0] if user_row[0] else user_row[2] if user_row[2] else "Unknown")
-            else:
-                user_name = "Unknown"
-            
-            all_messages.append({
-                "user": user_name,
-                "text": msg.get("text", ""),
-                "ts": msg.get("ts", "")
-            })
-        
-        conn.close()
-        return all_messages
-        
+
+        return build_ai_context_messages(messages)
+
     except Exception as e:
         logger.error(f"Error getting thread messages: {e}")
         logger.error(traceback.format_exc())
         return []
+
+
+def get_channel_messages(channel, latest_ts=None, limit=CHANNEL_RECAP_MESSAGE_LIMIT):
+    """Recupera gli ultimi N messaggi visibili nel canale."""
+    try:
+        all_messages = []
+        cursor = None
+
+        response = app.client.conversations_history(
+            channel=channel,
+            inclusive=True,
+            latest=latest_ts,
+            limit=min(limit, 200),
+        )
+        all_messages.extend(response.get("messages", []))
+
+        while response.get("has_more", False) and len(all_messages) < limit:
+            cursor = response.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+
+            response = app.client.conversations_history(
+                channel=channel,
+                cursor=cursor,
+                limit=min(limit - len(all_messages), 200),
+            )
+            all_messages.extend(response.get("messages", []))
+
+        # conversations_history restituisce i messaggi dal più recente al meno recente.
+        all_messages = all_messages[:limit]
+        all_messages.sort(key=lambda x: float(x.get("ts", 0)))
+
+        return build_ai_context_messages(all_messages)
+
+    except Exception as e:
+        logger.error(f"Error getting channel messages: {e}")
+        logger.error(traceback.format_exc())
+        return []
+
+
+def build_ai_context_messages(messages):
+    """Converte i messaggi Slack in un formato compatto per il prompt AI."""
+    conn = None
+
+    try:
+        conn, db_cursor = db_connect(database_path)
+        user_ids = sorted({
+            msg.get("user")
+            for msg in messages
+            if msg.get("user") and msg.get("user") != "USLACKBOT"
+        })
+        user_names = get_user_name_map(db_cursor, user_ids)
+
+        formatted_messages = []
+        for msg in messages:
+            user_id = msg.get("user", "")
+            text = (msg.get("text") or "").strip()
+
+            if not user_id or user_id == "USLACKBOT" or not text:
+                continue
+
+            formatted_messages.append({
+                "user": user_names.get(user_id, "Unknown"),
+                "text": text,
+                "ts": msg.get("ts", "")
+            })
+
+        return formatted_messages
+
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_user_name_map(db_cursor, user_ids):
+    """Restituisce una mappa user_id -> nome visualizzato."""
+    if not user_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in user_ids)
+    db_cursor.execute(
+        f"SELECT id, name, display_name, real_name FROM users WHERE id IN ({placeholders})",
+        tuple(user_ids),
+    )
+
+    user_names = {}
+    for user_id, name, display_name, real_name in db_cursor.fetchall():
+        user_names[user_id] = display_name or name or real_name or "Unknown"
+
+    return user_names
+
+
 
 
 def check_ai_throttle(conn, cursor, user_id, channel):
@@ -1008,11 +1077,16 @@ def handle_app_mention(event, say):
     Può essere chiamata sia dall'evento app_mention che da handle_message."""
     try:
         channel = event.get("channel")
-        thread_ts = event.get("ts")  # Timestamp del messaggio che menziona il bot
+        message_ts = event.get("ts")  # Timestamp del messaggio che menziona il bot
         text = event.get("text", "")
         user_id = event.get("user", "")
-        
-        logger.info(f"[AI] Bot mentioned by user {user_id} in channel {channel}, thread_ts: {thread_ts}, text: '{text[:100]}...'")
+        context_scope = get_ai_context_scope(event)
+        response_thread_ts = event.get("thread_ts") if context_scope == "thread" else message_ts
+
+        logger.info(
+            f"[AI] Bot mentioned by user {user_id} in channel {channel}, "
+            f"message_ts: {message_ts}, scope: {context_scope}, text: '{text[:100]}...'"
+        )
         
         # Controlla throttle
         conn, cursor = db_connect(database_path)
@@ -1021,9 +1095,7 @@ def handle_app_mention(event, say):
         logger.info(f"[AI] Throttle status: {throttle_info}")
         
         if not allowed:
-            # Determina thread_ts per la risposta
-            actual_thread_ts = event.get("thread_ts", thread_ts)
-            say(throttle_message, thread_ts=actual_thread_ts)
+            say(throttle_message, thread_ts=response_thread_ts)
             conn.close()
             return
         
@@ -1034,36 +1106,39 @@ def handle_app_mention(event, say):
         text = re.sub(rf'<@{bot_user_id}>', '', text).strip()
         
         if not text:
-            text = "Puoi aiutarmi con questa conversazione?"
-        
-        # Determina se è un thread o un messaggio principale
-        # Se il messaggio ha thread_ts diverso da ts, è una risposta in un thread
-        # Altrimenti, potrebbe essere l'inizio di un thread o un messaggio principale
-        is_thread_reply = "thread_ts" in event and event.get("thread_ts") != thread_ts
-        
-        if is_thread_reply:
-            # È una risposta in un thread esistente, usa thread_ts
-            actual_thread_ts = event.get("thread_ts")
+            if context_scope == "thread":
+                text = "Puoi aiutarmi con questa conversazione?"
+            else:
+                text = (
+                    f"Puoi fare un recap di questo canale basandoti sugli ultimi "
+                    f"{CHANNEL_RECAP_MESSAGE_LIMIT} messaggi?"
+                )
+
+        if context_scope == "thread":
+            logger.info(f"[AI] Fetching thread messages for thread_ts: {response_thread_ts}")
+            context_messages = get_thread_messages(channel, response_thread_ts)
+            context_label = "questa conversazione Slack"
         else:
-            # Potrebbe essere un messaggio principale o l'inizio di un thread
-            # Usa il timestamp del messaggio corrente come thread_ts
-            actual_thread_ts = thread_ts
-        
-        logger.info(f"[AI] Fetching thread messages for thread_ts: {actual_thread_ts}")
-        
-        # Recupera tutti i messaggi del thread
-        thread_messages = get_thread_messages(channel, actual_thread_ts)
-        
-        if not thread_messages:
-            say("Non ho trovato messaggi in questa conversazione.", thread_ts=actual_thread_ts)
+            logger.info(
+                f"[AI] Fetching last {CHANNEL_RECAP_MESSAGE_LIMIT} channel messages "
+                f"up to ts {message_ts}"
+            )
+            context_messages = get_channel_messages(
+                channel,
+                latest_ts=message_ts,
+                limit=CHANNEL_RECAP_MESSAGE_LIMIT,
+            )
+            context_label = (
+                f"gli ultimi {CHANNEL_RECAP_MESSAGE_LIMIT} messaggi visibili di questo canale Slack"
+            )
+
+        if not context_messages:
+            say("Non ho trovato messaggi utili in questo contesto.", thread_ts=response_thread_ts)
             return
         
-        logger.info(f"[AI] Found {len(thread_messages)} messages in thread")
-        
-        # Formatta i messaggi per il context
-        formatted_messages = "\n".join([
-            f"{msg['user']}: {msg['text']}" for msg in thread_messages
-        ])
+        logger.info(f"[AI] Found {len(context_messages)} messages for {context_scope} context")
+
+        formatted_messages = format_messages_for_prompt(context_messages)
         
         # === CONTESTO POTENZIATO SFERAIT ===
         # 1. Recupera messaggi recenti per catturare lo "stile" della community
@@ -1075,18 +1150,18 @@ def handle_app_mention(event, say):
             hours=48
         )
         logger.info(f"[AI] Retrieved {len(recent_context)} recent messages for ambient context")
-        
+
         # 2. Cerca nell'archivio messaggi rilevanti alla domanda
         archive_results = search_archive(conn_ctx, cursor_ctx, text, limit=5)
         logger.info(f"[AI] Found {len(archive_results)} relevant archive messages")
         conn_ctx.close()
-        
+
         # 3. Usa il system prompt SferaIT
         system_prompt = SFERAIT_SYSTEM_PROMPT
-        
+
         # 4. Costruisci prompt arricchito
         user_prompt = build_enhanced_prompt(
-            thread_messages=formatted_messages,
+            thread_messages=f"Fonte contesto: {context_label}\n\n{formatted_messages}",
             user_question=text,
             recent_context=recent_context,
             archive_results=archive_results
@@ -1096,12 +1171,12 @@ def handle_app_mention(event, say):
         openai_api_key = os.environ.get("OPENAI_API_KEY")
         if not openai_api_key:
             logger.error("[AI] OPENAI_API_KEY not set")
-            say("Errore: chiave API OpenAI non configurata.", thread_ts=actual_thread_ts)
+            say("Errore: chiave API OpenAI non configurata.", thread_ts=response_thread_ts)
             return
         
         client = OpenAI(api_key=openai_api_key)
         
-        logger.info(f"[AI] Sending request to OpenAI with {len(thread_messages)} messages")
+        logger.info(f"[AI] Sending request to OpenAI with {len(context_messages)} messages")
         
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -1144,7 +1219,7 @@ def handle_app_mention(event, say):
         logger.info(f"[AI] Added rate limit info: {current_minute_count}/2 per minuto, {current_hour_count}/10 per ora")
         
         # Rispondi nel thread
-        say(final_response, thread_ts=actual_thread_ts)
+        say(final_response, thread_ts=response_thread_ts)
         
     except Exception as e:
         logger.error(f"[AI] Error handling app mention: {e}")
