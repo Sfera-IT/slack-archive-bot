@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 import traceback
@@ -83,6 +84,13 @@ app = App(
 )
 
 CHANNEL_RECAP_MESSAGE_LIMIT = 1000
+
+# Auto-engagement su canale #trash
+TRASH_CHANNEL_NAMES = ["trash"]
+AUTO_ENGAGE_REPLY_THRESHOLD = 3       # reply count nel thread che triggera la decisione di engage
+AUTO_CLOWN_TOTAL_THRESHOLD = 5        # messaggi totali nel thread per valutare auto-clown
+AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage in #trash
+AUTO_ENGAGE_DECISION_MODEL = "gpt-4o-mini"
 
 # URL cleaner instance loading local rules
 _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "url_rules.json"))
@@ -239,10 +247,10 @@ def handle_query(event, cursor, say):
         logger.info(f"[CLOWN] Processing /clown command with nickname: '{nickname}'")
         if nickname:
             nickname_lower = nickname.lower()
-            expiry_date = datetime.now() + timedelta(days=7)
+            expiry_date = datetime.now() + timedelta(hours=24)
             add_clown_user(cursor.connection, cursor, nickname_lower, expiry_date)
             clean_expired_clown_users(cursor.connection, cursor)  # Pulisci utenti scaduti
-            say(f"✅ Aggiunto {nickname} alla lista clown per una settimana (scade il {expiry_date.strftime('%Y-%m-%d %H:%M:%S')})")
+            say(f"✅ Aggiunto {nickname} alla lista clown per 24 ore (scade il {expiry_date.strftime('%Y-%m-%d %H:%M:%S')})")
         else:
             logger.warning("[CLOWN] /clown command without nickname")
             say("❌ Devi specificare un nickname. Uso: /clown nickname")
@@ -850,8 +858,15 @@ def handle_message(message, say):
                 logger.debug(f"[CLOWN] User not in clown list (checked: {user_names_to_check})")
         else:
             logger.warning(f"[CLOWN] Could not find user in database for user_id: {message.get('user', 'unknown')}")
-        
+
         conn.close()
+
+        # Auto-engagement su #trash (solo reply in thread, gestito internamente)
+        try:
+            maybe_auto_engage_trash(message, say)
+        except Exception as e:
+            logger.error(f"[TRASH] Eccezione non gestita in maybe_auto_engage_trash: {e}")
+            logger.error(traceback.format_exc())
 
     logger.debug("--------------------------")
 
@@ -1228,6 +1243,247 @@ def handle_app_mention(event, say):
             say("Mi dispiace, c'è stato un errore nel processare la tua richiesta.", thread_ts=event.get("thread_ts", event.get("ts")))
         except:
             pass
+
+
+def _is_trash_channel(channel_id, cursor):
+    """True se il canale corrisponde a uno dei TRASH_CHANNEL_NAMES."""
+    cursor.execute("SELECT name FROM channels WHERE id = ?", (channel_id,))
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        return False
+    return row[0].lower() in TRASH_CHANNEL_NAMES
+
+
+def _format_thread_for_llm(messages):
+    """Formatta i messaggi del thread come 'user: text' per il prompt."""
+    return "\n".join(f"{m['user']}: {m['text']}" for m in messages)
+
+
+def _engage_cooldown_active(cursor):
+    """True se nell'ultimo AUTO_ENGAGE_COOLDOWN_SECONDS è già stato fatto un engage."""
+    cutoff = datetime.now().timestamp() - AUTO_ENGAGE_COOLDOWN_SECONDS
+    cursor.execute(
+        "SELECT 1 FROM trash_engaged_threads WHERE engaged = 1 AND evaluated_at > ? LIMIT 1",
+        (cutoff,),
+    )
+    return cursor.fetchone() is not None
+
+
+def _decide_engage(thread_messages, openai_client):
+    """LLM-call: decide se il bot deve inserirsi nel thread #trash. Ritorna (engage: bool, reply: str)."""
+    thread_text = _format_thread_for_llm(thread_messages)
+    system = (
+        SFERAIT_SYSTEM_PROMPT
+        + "\n\n## Modalità AUTO-ENGAGE\n"
+        "Stai osservando un thread su #trash a cui nessuno ti ha chiesto di partecipare. "
+        "Hai tutta la libertà di stare zitto. Inserisciti solo se: "
+        "(a) hai una battuta o un commento sarcastico che vale la pena leggere, "
+        "(b) qualcuno sta dicendo una boiata che puoi smontare, "
+        "(c) c'è una contraddizione o un inside-joke ovvio da rinfacciare. "
+        "NON inserirti per riassumere o spiegare cose ovvie. "
+        "Ritorna SOLO JSON valido: {\"engage\": bool, \"reply\": str}. "
+        "Se engage=false, reply può essere stringa vuota."
+    )
+    user_msg = f"Thread fino ad ora:\n{thread_text}\n\nDecidi se inserirti."
+    resp = openai_client.chat.completions.create(
+        model=AUTO_ENGAGE_DECISION_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        max_tokens=600,
+        temperature=0.8,
+        response_format={"type": "json_object"},
+    )
+    raw = resp.choices[0].message.content or "{}"
+    data = json.loads(raw)
+    return bool(data.get("engage")), (data.get("reply") or "").strip()
+
+
+def _decide_clown(thread_messages, openai_client):
+    """LLM-call: decide se qualcuno nel thread merita il clown. Ritorna (user_name: str|None, reason: str|None)."""
+    thread_text = _format_thread_for_llm(thread_messages)
+    system = (
+        "Sei il giudice clown di SferaIT. Stai osservando un thread di #trash. "
+        "Decidi se UN utente (massimo uno) ha detto qualcosa di così stupido, infantile, "
+        "ridicolo o contraddittorio da meritarsi la reaction 🤡 per 24 ore. "
+        "Usa parsimonia: il clown deve essere un'eccezione, non la regola. Se nessuno spicca, NON assegnarlo. "
+        "NON considerare mai il bot stesso (SferaIT) o utenti generici tipo 'bot' come candidati. "
+        "Ritorna SOLO JSON valido: {\"clown_user\": str|null, \"reason\": str|null}. "
+        "Il campo clown_user deve essere ESATTAMENTE il nome utente come appare nel thread."
+    )
+    user_msg = f"Thread:\n{thread_text}\n\nChi (se qualcuno) è clown?"
+    resp = openai_client.chat.completions.create(
+        model=AUTO_ENGAGE_DECISION_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        max_tokens=300,
+        temperature=0.5,
+        response_format={"type": "json_object"},
+    )
+    raw = resp.choices[0].message.content or "{}"
+    data = json.loads(raw)
+    user = data.get("clown_user")
+    reason = data.get("reason")
+    if not user or not isinstance(user, str):
+        return None, None
+    return user.strip(), (reason or "").strip()
+
+
+def _auto_reply_in_thread(channel, thread_ts, thread_messages, openai_client, say):
+    """Risposta del bot in un thread già engaged. Usa SFERAIT_SYSTEM_PROMPT."""
+    thread_text = _format_thread_for_llm(thread_messages)
+    user_prompt = (
+        f"Sei già parte di questa conversazione su #trash. Continua naturalmente, "
+        f"senza ripetere quello che hai già detto.\n\n## Conversazione\n{thread_text}\n\n"
+        f"Scrivi il prossimo messaggio (breve, in tono con la chat)."
+    )
+    resp = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": SFERAIT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=800,
+        temperature=0.8,
+    )
+    reply = resp.choices[0].message.content.strip()
+    if reply:
+        say(reply, thread_ts=thread_ts)
+
+
+def maybe_auto_engage_trash(message, say):
+    """Orchestra auto-engagement e auto-clown su thread di #trash.
+    Chiamato da handle_message per ogni messaggio (solo i reply in thread fanno qualcosa)."""
+    try:
+        thread_ts = message.get("thread_ts")
+        ts = message.get("ts")
+        channel = message.get("channel")
+        msg_user = message.get("user")
+
+        # Skip i messaggi del bot stesso per evitare loop infiniti
+        if msg_user == app._bot_user_id:
+            return
+
+        # Solo reply in thread, mai messaggi root
+        if not thread_ts or thread_ts == ts:
+            return
+
+        conn, cursor = db_connect(database_path)
+        try:
+            if not _is_trash_channel(channel, cursor):
+                return
+
+            # Recupera tutti i messaggi del thread (in ordine)
+            thread_messages = get_thread_messages(channel, thread_ts)
+            if not thread_messages:
+                return
+
+            # Esclude messaggi del bot stesso dal count "reply degli utenti"
+            bot_user_id = app._bot_user_id
+            user_reply_count = sum(
+                1 for m in thread_messages
+                if m.get("ts") != thread_ts  # non root
+            )
+
+            # Stato del thread nel DB
+            cursor.execute(
+                "SELECT decided, engaged, clown_assigned FROM trash_engaged_threads "
+                "WHERE thread_ts = ? AND channel = ?",
+                (thread_ts, channel),
+            )
+            row = cursor.fetchone()
+            decided = bool(row[0]) if row else False
+            engaged = bool(row[1]) if row else False
+            clown_assigned = row[2] if row else None
+
+            openai_api_key = os.environ.get("OPENAI_API_KEY")
+            if not openai_api_key:
+                logger.warning("[TRASH] OPENAI_API_KEY non configurata, skip auto-engage")
+                return
+            client = OpenAI(api_key=openai_api_key)
+
+            now_ts = datetime.now().timestamp()
+
+            # CASO A: thread non ancora valutato e abbiamo raggiunto la soglia → decidi engage
+            if not decided and user_reply_count >= AUTO_ENGAGE_REPLY_THRESHOLD:
+                if _engage_cooldown_active(cursor):
+                    logger.info(
+                        f"[TRASH] Cooldown attivo, skip decisione engage per thread {thread_ts}"
+                    )
+                    # Marca decided=1 engaged=0 per non rivalutare ogni reply
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO trash_engaged_threads "
+                        "(thread_ts, channel, decided, engaged, evaluated_at, last_reply_ts) "
+                        "VALUES (?, ?, 1, 0, ?, ?)",
+                        (thread_ts, channel, now_ts, ts),
+                    )
+                    conn.commit()
+                    return
+
+                logger.info(f"[TRASH] Decisione engage per thread {thread_ts} ({user_reply_count} reply)")
+                engage, reply = _decide_engage(thread_messages, client)
+                cursor.execute(
+                    "INSERT OR REPLACE INTO trash_engaged_threads "
+                    "(thread_ts, channel, decided, engaged, evaluated_at, last_reply_ts) "
+                    "VALUES (?, ?, 1, ?, ?, ?)",
+                    (thread_ts, channel, 1 if engage else 0, now_ts, ts),
+                )
+                conn.commit()
+
+                if engage and reply:
+                    logger.info(f"[TRASH] Engaging thread {thread_ts}")
+                    say(reply, thread_ts=thread_ts)
+                else:
+                    logger.info(f"[TRASH] Pass su thread {thread_ts}")
+                return
+
+            # CASO B: thread già engaged → rispondi a ogni nuovo reply (non del bot)
+            if engaged and message.get("user") != bot_user_id:
+                logger.info(f"[TRASH] Continuo conversazione in thread {thread_ts}")
+                _auto_reply_in_thread(channel, thread_ts, thread_messages, client, say)
+                cursor.execute(
+                    "UPDATE trash_engaged_threads SET last_reply_ts = ? "
+                    "WHERE thread_ts = ? AND channel = ?",
+                    (ts, thread_ts, channel),
+                )
+                conn.commit()
+
+                # CASO C: thread engaged abbastanza lungo, clown non ancora assegnato → valuta
+                total_msgs = len(thread_messages)
+                if not clown_assigned and total_msgs >= AUTO_CLOWN_TOTAL_THRESHOLD:
+                    logger.info(f"[TRASH] Valuto clown su thread {thread_ts} ({total_msgs} messaggi)")
+                    clown_name, reason = _decide_clown(thread_messages, client)
+                    if clown_name:
+                        nickname_lower = clown_name.lower()
+                        expiry = datetime.now() + timedelta(hours=24)
+                        add_clown_user(conn, cursor, nickname_lower, expiry)
+                        cursor.execute(
+                            "UPDATE trash_engaged_threads SET clown_assigned = ? "
+                            "WHERE thread_ts = ? AND channel = ?",
+                            (nickname_lower, thread_ts, channel),
+                        )
+                        conn.commit()
+                        announce = f"🤡 {clown_name}, ti sei meritato il clown per 24h."
+                        if reason:
+                            announce += f" Motivo: {reason}"
+                        say(announce, thread_ts=thread_ts)
+                    else:
+                        # Marca comunque come "valutato" per evitare rivalutazioni continue
+                        cursor.execute(
+                            "UPDATE trash_engaged_threads SET clown_assigned = ? "
+                            "WHERE thread_ts = ? AND channel = ?",
+                            ("__none__", thread_ts, channel),
+                        )
+                        conn.commit()
+        finally:
+            conn.close()
+
+    except Exception as e:
+        logger.error(f"[TRASH] Errore auto-engage: {e}")
+        logger.error(traceback.format_exc())
 
 
 @app.event("app_mention")

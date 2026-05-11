@@ -294,6 +294,31 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Tabella per tracciare i thread su #trash in cui il bot si è auto-ingaggiato
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trash_engaged_threads (
+                thread_ts TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                decided INTEGER NOT NULL DEFAULT 0,
+                engaged INTEGER NOT NULL DEFAULT 0,
+                evaluated_at REAL NOT NULL,
+                last_reply_ts TEXT,
+                clown_assigned TEXT,
+                PRIMARY KEY (thread_ts, channel)
+            )
+        """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trash_engaged_evaluated ON trash_engaged_threads(evaluated_at)
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
     # Migrazione: se la colonna timestamp è TEXT, la convertiamo in REAL
     try:
         cursor.execute("PRAGMA table_info(ai_requests)")
