@@ -88,15 +88,34 @@ CHANNEL_RECAP_MESSAGE_LIMIT = 1000
 # Auto-engagement su canale #trash
 TRASH_CHANNEL_NAMES = ["trash"]
 AUTO_ENGAGE_REPLY_THRESHOLD = 3       # reply count nel thread che triggera la decisione di engage
-AUTO_CLOWN_TOTAL_THRESHOLD = 5        # messaggi totali nel thread per valutare auto-clown
+AUTO_CLOWN_USER_REPLY_THRESHOLD = 8   # reply degli UTENTI nel thread engaged per valutare auto-clown
 AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage in #trash
 AUTO_ENGAGE_DECISION_MODEL = "gpt-4o-mini"
 
 # URL cleaner instance loading local rules
 _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "url_rules.json"))
 
-# Save the bot user's user ID
+# Save the bot user's user ID e display name (per identificare i propri messaggi nei thread)
 app._bot_user_id = app.client.auth_test()["user_id"]
+try:
+    _bot_profile = app.client.users_info(user=app._bot_user_id)["user"]["profile"]
+    app._bot_display_name = (
+        _bot_profile.get("display_name")
+        or _bot_profile.get("real_name")
+        or "bot"
+    )
+except Exception as _e:
+    logger.warning(f"Impossibile recuperare display_name del bot: {_e}")
+    app._bot_display_name = "bot"
+
+
+MENTION_HINT_PROMPT = (
+    "\n\n## Menzionare gli utenti\n"
+    "Per menzionare un utente nella tua risposta, scrivi `<@USER_ID>` usando "
+    "l'ID che trovi tra parentesi accanto al nome (es. `<@U011PQ7RHRT>`). "
+    "NON scrivere `@nome` o `@DisplayName`: non viene riconosciuto da Slack. "
+    "Se non hai un ID disponibile per quella persona, evita la mention.\n"
+)
 
 # Nota: clown_users è ora memorizzato nel database per essere condiviso tra worker Gunicorn
 # Le funzioni seguenti gestiscono la lettura/scrittura dal database
@@ -986,6 +1005,7 @@ def build_ai_context_messages(messages):
 
             formatted_messages.append({
                 "user": user_names.get(user_id, "Unknown"),
+                "user_id": user_id,
                 "text": text,
                 "ts": msg.get("ts", "")
             })
@@ -1171,8 +1191,8 @@ def handle_app_mention(event, say):
         logger.info(f"[AI] Found {len(archive_results)} relevant archive messages")
         conn_ctx.close()
 
-        # 3. Usa il system prompt SferaIT
-        system_prompt = SFERAIT_SYSTEM_PROMPT
+        # 3. Usa il system prompt SferaIT (+ hint per le mention native)
+        system_prompt = SFERAIT_SYSTEM_PROMPT + MENTION_HINT_PROMPT
 
         # 4. Costruisci prompt arricchito
         user_prompt = build_enhanced_prompt(
@@ -1255,8 +1275,18 @@ def _is_trash_channel(channel_id, cursor):
 
 
 def _format_thread_for_llm(messages):
-    """Formatta i messaggi del thread come 'user: text' per il prompt."""
-    return "\n".join(f"{m['user']}: {m['text']}" for m in messages)
+    """Formatta i messaggi del thread come 'Nome (<@USER_ID>): testo' per il prompt LLM.
+    L'inclusione dell'ID consente al modello di generare mention Slack native."""
+    lines = []
+    for m in messages:
+        user = m.get("user", "Unknown")
+        uid = m.get("user_id", "")
+        text = m.get("text", "")
+        if uid:
+            lines.append(f"{user} (<@{uid}>): {text}")
+        else:
+            lines.append(f"{user}: {text}")
+    return "\n".join(lines)
 
 
 def _engage_cooldown_active(cursor):
@@ -1274,6 +1304,7 @@ def _decide_engage(thread_messages, openai_client):
     thread_text = _format_thread_for_llm(thread_messages)
     system = (
         SFERAIT_SYSTEM_PROMPT
+        + MENTION_HINT_PROMPT
         + "\n\n## Modalità AUTO-ENGAGE\n"
         "Stai osservando un thread su #trash a cui nessuno ti ha chiesto di partecipare. "
         "Hai tutta la libertà di stare zitto. Inserisciti solo se: "
@@ -1281,6 +1312,7 @@ def _decide_engage(thread_messages, openai_client):
         "(b) qualcuno sta dicendo una boiata che puoi smontare, "
         "(c) c'è una contraddizione o un inside-joke ovvio da rinfacciare. "
         "NON inserirti per riassumere o spiegare cose ovvie. "
+        "Nel campo 'reply' NON prefissare con il tuo nome utente. "
         "Ritorna SOLO JSON valido: {\"engage\": bool, \"reply\": str}. "
         "Se engage=false, reply può essere stringa vuota."
     )
@@ -1297,7 +1329,7 @@ def _decide_engage(thread_messages, openai_client):
     )
     raw = resp.choices[0].message.content or "{}"
     data = json.loads(raw)
-    return bool(data.get("engage")), (data.get("reply") or "").strip()
+    return bool(data.get("engage")), _strip_bot_self_prefix((data.get("reply") or "").strip())
 
 
 def _decide_clown(thread_messages, openai_client):
@@ -1305,12 +1337,22 @@ def _decide_clown(thread_messages, openai_client):
     thread_text = _format_thread_for_llm(thread_messages)
     system = (
         "Sei il giudice clown di SferaIT. Stai osservando un thread di #trash. "
-        "Decidi se UN utente (massimo uno) ha detto qualcosa di così stupido, infantile, "
-        "ridicolo o contraddittorio da meritarsi la reaction 🤡 per 24 ore. "
-        "Usa parsimonia: il clown deve essere un'eccezione, non la regola. Se nessuno spicca, NON assegnarlo. "
-        "NON considerare mai il bot stesso (SferaIT) o utenti generici tipo 'bot' come candidati. "
+        "Decidi se UN utente merita la reaction 🤡 per 24 ore.\n\n"
+        "**DEFAULT: NESSUN CLOWN.** La maggior parte dei thread NON ha clown. "
+        "Solo una piccola minoranza di casi merita il riconoscimento.\n\n"
+        "Assegna il clown SOLO se è chiaramente evidente uno di questi: "
+        "(a) contraddizione palese e dimostrabile (ha detto X e poi l'opposto), "
+        "(b) autogol clamoroso (si è incastrato da solo, ha dimostrato di non capire ciò di cui parla), "
+        "(c) idea oggettivamente idiota argomentata seriamente come geniale, "
+        "(d) figura ridicola lampante che chiunque noterebbe.\n\n"
+        "NON assegnare per: tono infantile, ripetizioni, domande banali, frasi normali, "
+        "battute scemenze, scherzi, opinioni personali, lamentele, sfoghi. "
+        "NON considerare MAI il bot stesso, USLACKBOT o utenti generici.\n\n"
+        "Se hai anche solo un dubbio → clown_user=null. "
+        "È meglio non dare il clown a qualcuno che lo merita, "
+        "piuttosto che darlo a qualcuno che non lo merita.\n\n"
         "Ritorna SOLO JSON valido: {\"clown_user\": str|null, \"reason\": str|null}. "
-        "Il campo clown_user deve essere ESATTAMENTE il nome utente come appare nel thread."
+        "Il campo clown_user, se non null, deve essere ESATTAMENTE il nome utente come appare nel thread."
     )
     user_msg = f"Thread:\n{thread_text}\n\nChi (se qualcuno) è clown?"
     resp = openai_client.chat.completions.create(
@@ -1332,24 +1374,63 @@ def _decide_clown(thread_messages, openai_client):
     return user.strip(), (reason or "").strip()
 
 
+def _strip_bot_self_prefix(text):
+    """Rimuove eventuali prefissi tipo 'slack-archive-bot:' che l'LLM aggiunge in testa.
+    Funziona ricorsivamente in caso di prefissi multipli e gestisce sia il display
+    name del bot che alias generici."""
+    if not text:
+        return text
+    bot_name = (app._bot_display_name or "").strip().lower()
+    pattern_parts = ["slack-archive-bot", "bot", "assistant"]
+    if bot_name and bot_name not in pattern_parts:
+        pattern_parts.append(re.escape(bot_name))
+    pattern = r"^\s*(?:" + "|".join(pattern_parts) + r")\s*:\s*"
+    for _ in range(5):
+        new_text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+        if new_text == text:
+            break
+        text = new_text
+    return text.strip()
+
+
 def _auto_reply_in_thread(channel, thread_ts, thread_messages, openai_client, say):
-    """Risposta del bot in un thread già engaged. Usa SFERAIT_SYSTEM_PROMPT."""
-    thread_text = _format_thread_for_llm(thread_messages)
-    user_prompt = (
-        f"Sei già parte di questa conversazione su #trash. Continua naturalmente, "
-        f"senza ripetere quello che hai già detto.\n\n## Conversazione\n{thread_text}\n\n"
-        f"Scrivi il prossimo messaggio (breve, in tono con la chat)."
-    )
+    """Risposta del bot in un thread già engaged. Usa SFERAIT_SYSTEM_PROMPT.
+    Costruisce la sequenza messaggi role-based (assistant per i propri reply)
+    per evitare che il modello si auto-citi prefissando con il proprio nome."""
+    bot_user_id = app._bot_user_id
+
+    chat_messages = [
+        {"role": "system", "content": SFERAIT_SYSTEM_PROMPT + MENTION_HINT_PROMPT}
+    ]
+    for m in thread_messages:
+        text = m.get("text", "")
+        if not text:
+            continue
+        if m.get("user_id") == bot_user_id:
+            chat_messages.append({"role": "assistant", "content": text})
+        else:
+            user = m.get("user", "Unknown")
+            uid = m.get("user_id", "")
+            content = f"{user} (<@{uid}>): {text}" if uid else f"{user}: {text}"
+            chat_messages.append({"role": "user", "content": content})
+
+    chat_messages.append({
+        "role": "user",
+        "content": (
+            "Continua la conversazione con UN solo messaggio, breve e in tono. "
+            "Non prefissare la risposta con il tuo nome utente. "
+            "Scrivi direttamente il contenuto come se stessi parlando in chat."
+        ),
+    })
+
     resp = openai_client.chat.completions.create(
         model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SFERAIT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
+        messages=chat_messages,
         max_tokens=800,
         temperature=0.8,
     )
-    reply = resp.choices[0].message.content.strip()
+    reply = (resp.choices[0].message.content or "").strip()
+    reply = _strip_bot_self_prefix(reply)
     if reply:
         say(reply, thread_ts=thread_ts)
 
@@ -1381,11 +1462,11 @@ def maybe_auto_engage_trash(message, say):
             if not thread_messages:
                 return
 
-            # Esclude messaggi del bot stesso dal count "reply degli utenti"
+            # Esclude messaggi del bot stesso e il root dal count "reply degli utenti"
             bot_user_id = app._bot_user_id
             user_reply_count = sum(
                 1 for m in thread_messages
-                if m.get("ts") != thread_ts  # non root
+                if m.get("ts") != thread_ts and m.get("user_id") != bot_user_id
             )
 
             # Stato del thread nel DB
@@ -1452,9 +1533,17 @@ def maybe_auto_engage_trash(message, say):
                 conn.commit()
 
                 # CASO C: thread engaged abbastanza lungo, clown non ancora assegnato → valuta
-                total_msgs = len(thread_messages)
-                if not clown_assigned and total_msgs >= AUTO_CLOWN_TOTAL_THRESHOLD:
-                    logger.info(f"[TRASH] Valuto clown su thread {thread_ts} ({total_msgs} messaggi)")
+                # Conta SOLO i reply degli utenti (escludendo bot e root) per evitare di gonfiare
+                # il count con le risposte automatiche del bot stesso
+                user_reply_total = sum(
+                    1 for m in thread_messages
+                    if m.get("ts") != thread_ts and m.get("user_id") != bot_user_id
+                )
+                if not clown_assigned and user_reply_total >= AUTO_CLOWN_USER_REPLY_THRESHOLD:
+                    logger.info(
+                        f"[TRASH] Valuto clown su thread {thread_ts} "
+                        f"({user_reply_total} reply utenti, {len(thread_messages)} msg totali)"
+                    )
                     clown_name, reason = _decide_clown(thread_messages, client)
                     if clown_name:
                         nickname_lower = clown_name.lower()
