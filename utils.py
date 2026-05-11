@@ -252,6 +252,21 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Aggiungi colonne di tracking a clown_users (origine, autore, motivo)
+    for col_def in [
+        "source TEXT",
+        "assigned_by TEXT",
+        "assigned_at REAL",
+        "reason TEXT",
+        "thread_ts TEXT",
+        "channel TEXT",
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE clown_users ADD COLUMN {col_def}")
+            conn.commit()
+        except:
+            pass
+
     # Tabella per il throttle delle richieste AI (condivisa tra worker)
     try:
         cursor.execute(

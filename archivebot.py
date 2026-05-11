@@ -237,15 +237,29 @@ def is_user_in_clown_list(conn, cursor, nickname_lower):
     return result is not None
 
 
-def add_clown_user(conn, cursor, nickname_lower, expiry_date):
-    """Aggiunge un utente alla lista clown nel database."""
+def add_clown_user(conn, cursor, nickname_lower, expiry_date, *,
+                   source="manual", assigned_by=None, reason=None,
+                   thread_ts=None, channel=None):
+    """Aggiunge un utente alla lista clown nel database.
+
+    Metadata di tracking:
+    - source: 'manual' (comando /clown) o 'auto' (auto-clown del bot)
+    - assigned_by: user_id Slack di chi ha invocato (o 'auto')
+    - reason: motivo, popolato dall'auto-clown
+    - thread_ts, channel: contesto del clown auto
+    """
     expiry_str = expiry_date.isoformat()
+    assigned_at = datetime.now().timestamp()
     cursor.execute(
-        "INSERT OR REPLACE INTO clown_users (nickname, expiry_date) VALUES (?, ?)",
-        (nickname_lower, expiry_str)
+        "INSERT OR REPLACE INTO clown_users "
+        "(nickname, expiry_date, source, assigned_by, assigned_at, reason, thread_ts, channel) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (nickname_lower, expiry_str, source, assigned_by, assigned_at, reason, thread_ts, channel),
     )
     conn.commit()
-    logger.info(f"[CLOWN] Added {nickname_lower} to clown list in DB, expires: {expiry_date}")
+    logger.info(
+        f"[CLOWN] Added {nickname_lower} (source={source}, by={assigned_by}) expires: {expiry_date}"
+    )
 
 
 def remove_clown_user(conn, cursor, nickname_lower):
@@ -268,7 +282,10 @@ def handle_query(event, cursor, say):
         if nickname:
             nickname_lower = nickname.lower()
             expiry_date = datetime.now() + timedelta(hours=24)
-            add_clown_user(cursor.connection, cursor, nickname_lower, expiry_date)
+            add_clown_user(
+                cursor.connection, cursor, nickname_lower, expiry_date,
+                source="manual", assigned_by=user_id,
+            )
             clean_expired_clown_users(cursor.connection, cursor)  # Pulisci utenti scaduti
             say(f"✅ Aggiunto {nickname} alla lista clown per 24 ore (scade il {expiry_date.strftime('%Y-%m-%d %H:%M:%S')})")
         else:
@@ -294,6 +311,58 @@ def handle_query(event, cursor, say):
         else:
             logger.warning("[CLOWN] /clownremove command without nickname")
             say("❌ Devi specificare un nickname. Uso: /clownremove nickname")
+        return
+
+    # Gestisci comando /clowns — lista clown attivi con motivi/origine
+    if text.strip() in ("/clowns", "/clownlist"):
+        logger.info(f"[CLOWN] Processing /clowns command from user {user_id}")
+        clean_expired_clown_users(cursor.connection, cursor)
+        cursor.execute(
+            "SELECT nickname, expiry_date, source, assigned_by, reason, thread_ts, channel "
+            "FROM clown_users ORDER BY expiry_date"
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            say("🤡 Nessun clown attivo. La community è momentaneamente lucida.")
+            return
+
+        # Risolvi assigned_by user_id → display name
+        assignor_ids = sorted({r[3] for r in rows if r[3] and r[3] != "auto"})
+        assignor_names = get_user_name_map(cursor, assignor_ids) if assignor_ids else {}
+
+        lines = [f"🤡 *Clown attivi ({len(rows)}):*\n"]
+        now = datetime.now()
+        for nick, expiry, source, by, reason, t_ts, ch in rows:
+            # Parsing expiry (ISO format)
+            try:
+                exp_dt = datetime.fromisoformat(expiry)
+                delta = exp_dt - now
+                if delta.total_seconds() < 0:
+                    when = "scaduto (in pulizia)"
+                else:
+                    hours = int(delta.total_seconds() // 3600)
+                    minutes = int((delta.total_seconds() % 3600) // 60)
+                    when = f"scade tra {hours}h{minutes:02d}m"
+            except Exception:
+                when = f"scade il {expiry}"
+
+            line = f"• *{nick}* — {when}"
+            if source == "auto":
+                line += "\n   _auto_"
+                if ch:
+                    line += f" in <#{ch}>"
+                if t_ts:
+                    line += f", thread `{t_ts}`"
+                if reason:
+                    line += f"\n   motivo: _{reason}_"
+            elif source == "manual" and by:
+                assignor = assignor_names.get(by, by)
+                line += f"\n   _manuale_ da <@{by}> ({assignor})"
+            else:
+                line += "\n   _origine non tracciata (legacy)_"
+            lines.append(line)
+
+        say("\n".join(lines))
         return
 
     # Gestisci comando /optout <user_id> (solo admin)
@@ -1669,7 +1738,11 @@ def maybe_auto_engage_trash(message, say):
                     if clown_name:
                         nickname_lower = clown_name.lower()
                         expiry = datetime.now() + timedelta(hours=24)
-                        add_clown_user(conn, cursor, nickname_lower, expiry)
+                        add_clown_user(
+                            conn, cursor, nickname_lower, expiry,
+                            source="auto", assigned_by="auto",
+                            reason=reason, thread_ts=thread_ts, channel=channel,
+                        )
                         cursor.execute(
                             "UPDATE trash_engaged_threads SET clown_assigned = ? "
                             "WHERE thread_ts = ? AND channel = ?",
