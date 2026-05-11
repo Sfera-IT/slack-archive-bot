@@ -319,6 +319,18 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Add `stopped` to trash_engaged_threads (per il comando @bot stop)
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE trash_engaged_threads
+            ADD COLUMN stopped INTEGER NOT NULL DEFAULT 0
+            """
+        )
+        conn.commit()
+    except:
+        pass
+
     # Migrazione: se la colonna timestamp è TEXT, la convertiamo in REAL
     try:
         cursor.execute("PRAGMA table_info(ai_requests)")

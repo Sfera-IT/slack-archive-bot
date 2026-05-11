@@ -91,6 +91,7 @@ AUTO_ENGAGE_REPLY_THRESHOLD = 3       # reply count nel thread che triggera la d
 AUTO_CLOWN_USER_REPLY_THRESHOLD = 8   # reply degli UTENTI nel thread engaged per valutare auto-clown
 AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage in #trash
 AUTO_ENGAGE_DECISION_MODEL = "gpt-4o-mini"
+STOP_HINT_SUFFIX_TEMPLATE = "\n\n_per fermarmi: `<@{bot_id}> stop`_"
 
 # URL cleaner instance loading local rules
 _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "url_rules.json"))
@@ -744,6 +745,13 @@ def handle_message(message, say):
     text = message.get("text", "")
     if bot_user_id and f"<@{bot_user_id}>" in text:
         logger.info(f"[AI] Bot mentioned in message (via handle_message) by user {user_id}")
+        # Intercetta il comando "stop" in un thread engaged di #trash
+        try:
+            if _maybe_handle_trash_stop(message, say):
+                return
+        except Exception as e:
+            logger.error(f"[TRASH] Errore intercept stop: {e}")
+            logger.error(traceback.format_exc())
         # Gestisci la menzione
         try:
             handle_app_mention(message, say)
@@ -1393,6 +1401,46 @@ def _strip_bot_self_prefix(text):
     return text.strip()
 
 
+def _reply_every_n(user_replies_count):
+    """Tabella di decay: ogni quanti reply utente il bot deve rispondere.
+    Thread brevi -> 1 (sempre). Thread lunghissimi -> 1 ogni 10."""
+    if user_replies_count <= 25:
+        return 1
+    if user_replies_count <= 40:
+        return 2
+    if user_replies_count <= 60:
+        return 3
+    if user_replies_count <= 80:
+        return 5
+    if user_replies_count <= 120:
+        return 7
+    return 10
+
+
+def _should_reply_now(thread_messages, bot_user_id):
+    """Decide se il bot debba rispondere al nuovo reply utente.
+    Risponde se sono passati >= N reply utente dall'ultimo intervento del bot,
+    dove N cresce con la lunghezza del thread (vedi _reply_every_n)."""
+    ordered = sorted(thread_messages, key=lambda m: float(m.get("ts", 0) or 0))
+
+    user_replies_count = sum(
+        1 for m in ordered if m.get("user_id") and m.get("user_id") != bot_user_id
+    )
+
+    last_bot_idx = -1
+    for i, m in enumerate(ordered):
+        if m.get("user_id") == bot_user_id:
+            last_bot_idx = i
+
+    tail = ordered[last_bot_idx + 1:] if last_bot_idx >= 0 else ordered
+    replies_since_last_bot = sum(
+        1 for m in tail if m.get("user_id") and m.get("user_id") != bot_user_id
+    )
+
+    n_required = _reply_every_n(user_replies_count)
+    return replies_since_last_bot >= n_required, user_replies_count, replies_since_last_bot, n_required
+
+
 def _auto_reply_in_thread(channel, thread_ts, thread_messages, openai_client, say):
     """Risposta del bot in un thread già engaged. Usa SFERAIT_SYSTEM_PROMPT.
     Costruisce la sequenza messaggi role-based (assistant per i propri reply)
@@ -1432,7 +1480,64 @@ def _auto_reply_in_thread(channel, thread_ts, thread_messages, openai_client, sa
     reply = (resp.choices[0].message.content or "").strip()
     reply = _strip_bot_self_prefix(reply)
     if reply:
+        reply += STOP_HINT_SUFFIX_TEMPLATE.format(bot_id=app._bot_user_id)
         say(reply, thread_ts=thread_ts)
+
+
+_STOP_KEYWORD_RE = re.compile(
+    r"^\s*(stop|basta|smettila|silenzio|zitto|shut\s*up)\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _maybe_handle_trash_stop(message, say):
+    """Se il messaggio è una mention al bot in un thread engaged di #trash con
+    testo 'stop' (o equivalente), marca il thread come stopped e ritorna True.
+    Altrimenti ritorna False."""
+    thread_ts = message.get("thread_ts")
+    ts = message.get("ts")
+    channel = message.get("channel")
+    text = message.get("text", "") or ""
+    bot_user_id = app._bot_user_id
+
+    # Solo reply in thread (no root, no DM, no canali random)
+    if not thread_ts or thread_ts == ts:
+        return False
+
+    # Strip della mention al bot
+    stripped = re.sub(rf"<@{bot_user_id}>", "", text).strip()
+    if not _STOP_KEYWORD_RE.match(stripped):
+        return False
+
+    conn, cursor = db_connect(database_path)
+    try:
+        if not _is_trash_channel(channel, cursor):
+            return False
+
+        cursor.execute(
+            "SELECT engaged FROM trash_engaged_threads WHERE thread_ts = ? AND channel = ?",
+            (thread_ts, channel),
+        )
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            # Non c'e un engage attivo da fermare
+            return False
+
+        cursor.execute(
+            "UPDATE trash_engaged_threads SET stopped = 1 "
+            "WHERE thread_ts = ? AND channel = ?",
+            (thread_ts, channel),
+        )
+        conn.commit()
+        logger.info(f"[TRASH] Thread {thread_ts} stoppato su richiesta utente")
+        try:
+            app.client.reactions_add(channel=channel, timestamp=ts, name="zipper_mouth_face")
+        except Exception as e:
+            logger.warning(f"[TRASH] Impossibile aggiungere reaction stop: {e}")
+        say("Ok, mi zitto su questo thread. :zipper_mouth_face:", thread_ts=thread_ts)
+        return True
+    finally:
+        conn.close()
 
 
 def maybe_auto_engage_trash(message, say):
@@ -1471,7 +1576,7 @@ def maybe_auto_engage_trash(message, say):
 
             # Stato del thread nel DB
             cursor.execute(
-                "SELECT decided, engaged, clown_assigned FROM trash_engaged_threads "
+                "SELECT decided, engaged, clown_assigned, stopped FROM trash_engaged_threads "
                 "WHERE thread_ts = ? AND channel = ?",
                 (thread_ts, channel),
             )
@@ -1479,6 +1584,12 @@ def maybe_auto_engage_trash(message, say):
             decided = bool(row[0]) if row else False
             engaged = bool(row[1]) if row else False
             clown_assigned = row[2] if row else None
+            stopped = bool(row[3]) if row and len(row) > 3 else False
+
+            # Se l'utente ha detto stop, il bot non interviene piu in questo thread
+            if stopped:
+                logger.info(f"[TRASH] Thread {thread_ts} stoppato dall'utente, skip")
+                return
 
             openai_api_key = os.environ.get("OPENAI_API_KEY")
             if not openai_api_key:
@@ -1516,15 +1627,25 @@ def maybe_auto_engage_trash(message, say):
 
                 if engage and reply:
                     logger.info(f"[TRASH] Engaging thread {thread_ts}")
+                    reply += STOP_HINT_SUFFIX_TEMPLATE.format(bot_id=bot_user_id)
                     say(reply, thread_ts=thread_ts)
                 else:
                     logger.info(f"[TRASH] Pass su thread {thread_ts}")
                 return
 
-            # CASO B: thread già engaged → rispondi a ogni nuovo reply (non del bot)
+            # CASO B: thread già engaged → rispondi (con decay sulla lunghezza)
             if engaged and message.get("user") != bot_user_id:
-                logger.info(f"[TRASH] Continuo conversazione in thread {thread_ts}")
-                _auto_reply_in_thread(channel, thread_ts, thread_messages, client, say)
+                should_reply, total_user_replies, since_last, n_req = _should_reply_now(
+                    thread_messages, bot_user_id
+                )
+                logger.info(
+                    f"[TRASH] Thread {thread_ts} engaged - "
+                    f"user_replies_total={total_user_replies}, "
+                    f"since_last_bot={since_last}, n_required={n_req}, "
+                    f"should_reply={should_reply}"
+                )
+                if should_reply:
+                    _auto_reply_in_thread(channel, thread_ts, thread_messages, client, say)
                 cursor.execute(
                     "UPDATE trash_engaged_threads SET last_reply_ts = ? "
                     "WHERE thread_ts = ? AND channel = ?",
