@@ -25,5 +25,5 @@ timedelta==2020.12.3
 torch==2.8.0
 urllib3==2.7.0
 watchdog==4.0.1
-werkzeug==3.1.5
+werkzeug==3.1.6
 pytest==9.0.3
