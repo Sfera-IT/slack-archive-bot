@@ -85,11 +85,11 @@ app = App(
 
 CHANNEL_RECAP_MESSAGE_LIMIT = 1000
 
-# Auto-engagement su canale #trash
-TRASH_CHANNEL_NAMES = ["trash"]
+# Auto-engagement su canali community
+TRASH_CHANNEL_NAMES = ["trash", "rants"]
 AUTO_ENGAGE_REPLY_THRESHOLD = 3       # reply count nel thread che triggera la decisione di engage
 AUTO_CLOWN_USER_REPLY_THRESHOLD = 8   # reply degli UTENTI nel thread engaged per valutare auto-clown
-AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage in #trash
+AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage nei canali auto-engage
 AUTO_ENGAGE_DECISION_MODEL = "gpt-4o-mini"
 STOP_HINT_SUFFIX_TEMPLATE = "\n\n_per fermarmi: `<@{bot_id}> stop`_"
 
@@ -1419,7 +1419,7 @@ def _decide_engage(thread_messages, openai_client):
         SFERAIT_SYSTEM_PROMPT
         + MENTION_HINT_PROMPT
         + "\n\n## Modalità AUTO-ENGAGE\n"
-        "Stai osservando un thread su #trash a cui nessuno ti ha chiesto di partecipare. "
+        "Stai osservando un thread in un canale informale della community a cui nessuno ti ha chiesto di partecipare. "
         "Hai tutta la libertà di stare zitto. Inserisciti solo se: "
         "(a) hai una battuta o un commento sarcastico che vale la pena leggere, "
         "(b) qualcuno sta dicendo una boiata che puoi smontare, "
@@ -1449,7 +1449,7 @@ def _decide_clown(thread_messages, openai_client):
     """LLM-call: decide se qualcuno nel thread merita il clown. Ritorna (user_name: str|None, reason: str|None)."""
     thread_text = _format_thread_for_llm(thread_messages)
     system = (
-        "Sei il giudice clown di SferaIT. Stai osservando un thread di #trash. "
+        "Sei il giudice clown di SferaIT. Stai osservando un thread in un canale informale della community. "
         "Decidi se UN utente merita la reaction 🤡 per 24 ore.\n\n"
         "**DEFAULT: NESSUN CLOWN.** La maggior parte dei thread NON ha clown. "
         "Solo una piccola minoranza di casi merita il riconoscimento.\n\n"
