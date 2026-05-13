@@ -206,15 +206,42 @@ def update_channels(conn, cursor):
     conn.commit()
 
 
+def _parse_clown_expiry(expiry_date):
+    """Parsing robusto della scadenza clown.
+
+    Non ci fidiamo del confronto lessicografico su TEXT: se in futuro il formato
+    cambia leggermente, un clown può restare attivo per sempre. Qui convertiamo
+    sempre a datetime e, se il valore è illeggibile, lo consideriamo scaduto.
+    """
+    if not expiry_date:
+        return None
+    try:
+        return datetime.fromisoformat(str(expiry_date))
+    except Exception:
+        try:
+            return datetime.strptime(str(expiry_date), "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            logger.warning(f"[CLOWN] expiry_date non parsabile, considero scaduto: {expiry_date}")
+            return None
+
+
+def _is_clown_expired(expiry_date, now=None):
+    expiry = _parse_clown_expiry(expiry_date)
+    if expiry is None:
+        return True
+    return expiry <= (now or datetime.now())
+
+
 def clean_expired_clown_users(conn, cursor):
     """Rimuove gli utenti scaduti dalla lista clown nel database."""
-    now = datetime.now().isoformat()
-    cursor.execute("SELECT nickname FROM clown_users WHERE expiry_date < ?", (now,))
-    expired = [row[0] for row in cursor.fetchall()]
+    now = datetime.now()
+    cursor.execute("SELECT nickname, expiry_date FROM clown_users")
+    current_users = cursor.fetchall()
+    expired = [nickname for nickname, expiry in current_users if _is_clown_expired(expiry, now)]
     
     if expired:
         logger.info(f"[CLOWN] Cleaning {len(expired)} expired users: {expired}")
-        cursor.execute("DELETE FROM clown_users WHERE expiry_date < ?", (now,))
+        cursor.executemany("DELETE FROM clown_users WHERE nickname = ?", [(nickname,) for nickname in expired])
         conn.commit()
         for nickname in expired:
             logger.info(f"[CLOWN] Removed expired clown user: {nickname}")
@@ -231,10 +258,19 @@ def clean_expired_clown_users(conn, cursor):
 
 def is_user_in_clown_list(conn, cursor, nickname_lower):
     """Verifica se un utente è nella lista clown e non è scaduto."""
-    clean_expired_clown_users(conn, cursor)
     cursor.execute("SELECT expiry_date FROM clown_users WHERE nickname = ?", (nickname_lower,))
     result = cursor.fetchone()
-    return result is not None
+    if result is None:
+        return False
+
+    expiry_date = result[0]
+    if _is_clown_expired(expiry_date):
+        logger.info(f"[CLOWN] {nickname_lower} expired at {expiry_date}; removing before reaction")
+        cursor.execute("DELETE FROM clown_users WHERE nickname = ?", (nickname_lower,))
+        conn.commit()
+        return False
+
+    return True
 
 
 def add_clown_user(conn, cursor, nickname_lower, expiry_date, *,
