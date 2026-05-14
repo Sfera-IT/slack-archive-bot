@@ -67,7 +67,7 @@ Quando ti chiedono un riassunto:
 Il riassunto deve essere abbastanza lungo da essere UTILE. Non 3 righe vaghe."""
 
 
-CONTEXT_CHANNELS = ["random", "rants", "trash", "offtopic", "off-topic", "cazzeggio"]
+CONTEXT_CHANNELS = ["trash"]
 
 
 def get_recent_messages(conn, cursor, limit=100, exclude_channel=None, hours=72):

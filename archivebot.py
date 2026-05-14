@@ -85,8 +85,8 @@ app = App(
 
 CHANNEL_RECAP_MESSAGE_LIMIT = 1000
 
-# Auto-engagement su canali community
-TRASH_CHANNEL_NAMES = ["trash", "rants"]
+# Auto-engagement solo su #trash
+TRASH_CHANNEL_NAMES = ["trash"]
 AUTO_ENGAGE_REPLY_THRESHOLD = 3       # reply count nel thread che triggera la decisione di engage
 AUTO_CLOWN_USER_REPLY_THRESHOLD = 8   # reply degli UTENTI nel thread engaged per valutare auto-clown
 AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage nei canali auto-engage
