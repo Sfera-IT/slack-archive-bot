@@ -1415,6 +1415,73 @@ def _engage_cooldown_active(cursor):
     return cursor.fetchone() is not None
 
 
+def _looks_like_legacy_cooldown_deferred(cursor, evaluated_at):
+    """Compat per righe create prima del flag cooldown_deferred."""
+    if evaluated_at is None:
+        return False
+    try:
+        evaluated_at = float(evaluated_at)
+    except (TypeError, ValueError):
+        return False
+    cursor.execute(
+        """
+        SELECT 1 FROM trash_engaged_threads
+        WHERE engaged = 1
+          AND evaluated_at <= ?
+          AND evaluated_at > ?
+        LIMIT 1
+        """,
+        (evaluated_at, evaluated_at - AUTO_ENGAGE_COOLDOWN_SECONDS),
+    )
+    return cursor.fetchone() is not None
+
+
+def _save_trash_engage_decision(
+    cursor,
+    thread_ts,
+    channel,
+    decided,
+    engaged,
+    evaluated_at,
+    last_reply_ts,
+    cooldown_deferred=0,
+):
+    """Upsert dello stato auto-engage senza perdere stop/clown gia salvati."""
+    cursor.execute(
+        """
+        UPDATE trash_engaged_threads
+        SET decided = ?, engaged = ?, evaluated_at = ?, last_reply_ts = ?, cooldown_deferred = ?
+        WHERE thread_ts = ? AND channel = ?
+        """,
+        (
+            1 if decided else 0,
+            1 if engaged else 0,
+            evaluated_at,
+            last_reply_ts,
+            1 if cooldown_deferred else 0,
+            thread_ts,
+            channel,
+        ),
+    )
+    if cursor.rowcount == 0:
+        cursor.execute(
+            """
+            INSERT INTO trash_engaged_threads
+            (thread_ts, channel, decided, engaged, evaluated_at, last_reply_ts, cooldown_deferred)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                thread_ts,
+                channel,
+                1 if decided else 0,
+                1 if engaged else 0,
+                evaluated_at,
+                last_reply_ts,
+                1 if cooldown_deferred else 0,
+            ),
+        )
+
+
 def _decide_engage(thread_messages, openai_client):
     """LLM-call: decide se il bot deve inserirsi nel thread #trash. Ritorna (engage: bool, reply: str)."""
     thread_text = _format_thread_for_llm(thread_messages)
@@ -1855,7 +1922,7 @@ def maybe_auto_engage_trash(message, say):
 
             # Stato del thread nel DB
             cursor.execute(
-                "SELECT decided, engaged, clown_assigned, stopped FROM trash_engaged_threads "
+                "SELECT decided, engaged, clown_assigned, stopped, cooldown_deferred, evaluated_at FROM trash_engaged_threads "
                 "WHERE thread_ts = ? AND channel = ?",
                 (thread_ts, channel),
             )
@@ -1864,6 +1931,8 @@ def maybe_auto_engage_trash(message, say):
             engaged = bool(row[1]) if row else False
             clown_assigned = row[2] if row else None
             stopped = bool(row[3]) if row and len(row) > 3 else False
+            cooldown_deferred = bool(row[4]) if row and len(row) > 4 else False
+            evaluated_at = row[5] if row and len(row) > 5 else None
 
             # Se l'utente ha detto stop, il bot non interviene piu in questo thread
             if stopped:
@@ -1879,28 +1948,48 @@ def maybe_auto_engage_trash(message, say):
             now_ts = datetime.now().timestamp()
 
             # CASO A: thread non ancora valutato e abbiamo raggiunto la soglia → decidi engage
+            if (
+                decided
+                and not engaged
+                and not cooldown_deferred
+                and _looks_like_legacy_cooldown_deferred(cursor, evaluated_at)
+            ):
+                logger.info(f"[TRASH] Thread {thread_ts} sembra rimandato da cooldown pre-migrazione")
+                cooldown_deferred = True
+
+            if decided and not engaged and cooldown_deferred and not _engage_cooldown_active(cursor):
+                logger.info(f"[TRASH] Cooldown scaduto, rivaluto thread rimandato {thread_ts}")
+                decided = False
+
             if not decided and user_reply_count >= AUTO_ENGAGE_REPLY_THRESHOLD:
                 if _engage_cooldown_active(cursor):
                     logger.info(
-                        f"[TRASH] Cooldown attivo, skip decisione engage per thread {thread_ts}"
+                        f"[TRASH] Cooldown attivo, rimando decisione engage per thread {thread_ts}"
                     )
-                    # Marca decided=1 engaged=0 per non rivalutare ogni reply
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO trash_engaged_threads "
-                        "(thread_ts, channel, decided, engaged, evaluated_at, last_reply_ts) "
-                        "VALUES (?, ?, 1, 0, ?, ?)",
-                        (thread_ts, channel, now_ts, ts),
+                    _save_trash_engage_decision(
+                        cursor,
+                        thread_ts,
+                        channel,
+                        decided=True,
+                        engaged=False,
+                        evaluated_at=now_ts,
+                        last_reply_ts=ts,
+                        cooldown_deferred=True,
                     )
                     conn.commit()
                     return
 
                 logger.info(f"[TRASH] Decisione engage per thread {thread_ts} ({user_reply_count} reply)")
                 engage, reply = _decide_engage(thread_messages, client)
-                cursor.execute(
-                    "INSERT OR REPLACE INTO trash_engaged_threads "
-                    "(thread_ts, channel, decided, engaged, evaluated_at, last_reply_ts) "
-                    "VALUES (?, ?, 1, ?, ?, ?)",
-                    (thread_ts, channel, 1 if engage else 0, now_ts, ts),
+                _save_trash_engage_decision(
+                    cursor,
+                    thread_ts,
+                    channel,
+                    decided=True,
+                    engaged=engage,
+                    evaluated_at=now_ts,
+                    last_reply_ts=ts,
+                    cooldown_deferred=False,
                 )
                 conn.commit()
 

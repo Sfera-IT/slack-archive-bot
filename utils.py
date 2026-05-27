@@ -321,6 +321,7 @@ def migrate_db(conn, cursor):
                 evaluated_at REAL NOT NULL,
                 last_reply_ts TEXT,
                 clown_assigned TEXT,
+                cooldown_deferred INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (thread_ts, channel)
             )
         """
@@ -340,6 +341,18 @@ def migrate_db(conn, cursor):
             """
             ALTER TABLE trash_engaged_threads
             ADD COLUMN stopped INTEGER NOT NULL DEFAULT 0
+            """
+        )
+        conn.commit()
+    except:
+        pass
+
+    # Add `cooldown_deferred` to distinguish a temporary cooldown skip from a real LLM pass.
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE trash_engaged_threads
+            ADD COLUMN cooldown_deferred INTEGER NOT NULL DEFAULT 0
             """
         )
         conn.commit()
