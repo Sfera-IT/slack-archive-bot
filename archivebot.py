@@ -92,6 +92,7 @@ AUTO_CLOWN_USER_REPLY_THRESHOLD = 8   # reply degli UTENTI nel thread engaged pe
 AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage nei canali auto-engage
 AUTO_ENGAGE_DECISION_MODEL = "gpt-4o-mini"
 STOP_HINT_SUFFIX_TEMPLATE = "\n\n_per fermarmi: `<@{bot_id}> stop`_"
+TRASH_STOP_ACTION_ID = "trash_stop_thread"
 
 # URL cleaner instance loading local rules
 _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "url_rules.json"))
@@ -848,15 +849,17 @@ def handle_message(message, say):
     # Controlla se il bot è menzionato nel messaggio
     bot_user_id = app._bot_user_id
     text = message.get("text", "")
+    # Intercetta anche stop testuali copiati male dal suggerimento Slack
+    # (es. _`@slack-archive-bot stop`_), che non generano una mention nativa.
+    try:
+        if _maybe_handle_trash_stop(message, say):
+            return
+    except Exception as e:
+        logger.error(f"[TRASH] Errore intercept stop: {e}")
+        logger.error(traceback.format_exc())
+
     if bot_user_id and f"<@{bot_user_id}>" in text:
         logger.info(f"[AI] Bot mentioned in message (via handle_message) by user {user_id}")
-        # Intercetta il comando "stop" in un thread engaged di #trash
-        try:
-            if _maybe_handle_trash_stop(message, say):
-                return
-        except Exception as e:
-            logger.error(f"[TRASH] Errore intercept stop: {e}")
-            logger.error(traceback.format_exc())
         # Gestisci la menzione
         try:
             handle_app_mention(message, say)
@@ -1506,6 +1509,112 @@ def _strip_bot_self_prefix(text):
     return text.strip()
 
 
+def _trash_stop_text_fallback():
+    return STOP_HINT_SUFFIX_TEMPLATE.format(bot_id=app._bot_user_id)
+
+
+def _trash_stop_button_blocks(reply, channel, thread_ts):
+    """Crea i blocchi Slack per le risposte auto-engage con bottone di stop."""
+    payload = json.dumps({"channel": channel, "thread_ts": thread_ts})
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": reply[:3000],
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Zitto",
+                        "emoji": True,
+                    },
+                    "style": "danger",
+                    "action_id": TRASH_STOP_ACTION_ID,
+                    "value": payload,
+                }
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": _trash_stop_text_fallback().strip(),
+                }
+            ],
+        },
+    ]
+
+
+def _say_trash_auto_reply(say, reply, channel, thread_ts):
+    """Posta una risposta auto-engage con fallback testuale e bottone stop."""
+    say(
+        text=reply + _trash_stop_text_fallback(),
+        blocks=_trash_stop_button_blocks(reply, channel, thread_ts),
+        thread_ts=thread_ts,
+    )
+
+
+def _normalize_trash_stop_text(text):
+    """Rende tollerante il comando stop copiato da Slack con markup residuo."""
+    if not text:
+        return ""
+
+    normalized = text.strip()
+    normalized = normalized.replace("\u200b", "")
+    normalized = re.sub(r"[`*_~]+", "", normalized)
+    normalized = re.sub(r"&lt;", "<", normalized)
+    normalized = re.sub(r"&gt;", ">", normalized)
+    normalized = re.sub(r"&amp;", "&", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def _bot_text_aliases():
+    aliases = ["slack-archive-bot"]
+    bot_name = (app._bot_display_name or "").strip()
+    if bot_name and bot_name.lower() not in {a.lower() for a in aliases}:
+        aliases.append(bot_name)
+    return aliases
+
+
+def _is_trash_stop_text(text, bot_user_id):
+    """True se il testo chiede al bot di fermarsi nel thread.
+
+    Accetta sia mention Slack native (`<@U...> stop`) sia copie testuali tipo
+    `@slack-archive-bot stop`, anche se avvolte in corsivo/backtick.
+    """
+    normalized = _normalize_trash_stop_text(text)
+    if not normalized:
+        return False
+
+    mention_re = rf"<@{re.escape(bot_user_id)}(?:\|[^>]+)?>"
+    without_mention = re.sub(mention_re, "", normalized).strip()
+    if without_mention != normalized and _STOP_KEYWORD_RE.match(without_mention):
+        return True
+
+    for alias in _bot_text_aliases():
+        alias_re = re.escape(alias)
+        if re.match(rf"^\s*@?{alias_re}\b[:,]?\s+", normalized, re.IGNORECASE):
+            without_alias = re.sub(
+                rf"^\s*@?{alias_re}\b[:,]?\s+",
+                "",
+                normalized,
+                count=1,
+                flags=re.IGNORECASE,
+            ).strip()
+            if _STOP_KEYWORD_RE.match(without_alias):
+                return True
+
+    return False
+
+
 def _reply_every_n(user_replies_count):
     """Tabella di decay: ogni quanti reply utente il bot deve rispondere.
     Thread brevi -> 1 (sempre). Thread lunghissimi -> 1 ogni 10."""
@@ -1585,8 +1694,7 @@ def _auto_reply_in_thread(channel, thread_ts, thread_messages, openai_client, sa
     reply = (resp.choices[0].message.content or "").strip()
     reply = _strip_bot_self_prefix(reply)
     if reply:
-        reply += STOP_HINT_SUFFIX_TEMPLATE.format(bot_id=app._bot_user_id)
-        say(reply, thread_ts=thread_ts)
+        _say_trash_auto_reply(say, reply, channel, thread_ts)
 
 
 _STOP_KEYWORD_RE = re.compile(
@@ -1609,9 +1717,7 @@ def _maybe_handle_trash_stop(message, say):
     if not thread_ts or thread_ts == ts:
         return False
 
-    # Strip della mention al bot
-    stripped = re.sub(rf"<@{bot_user_id}>", "", text).strip()
-    if not _STOP_KEYWORD_RE.match(stripped):
+    if not _is_trash_stop_text(text, bot_user_id):
         return False
 
     conn, cursor = db_connect(database_path)
@@ -1641,6 +1747,74 @@ def _maybe_handle_trash_stop(message, say):
             logger.warning(f"[TRASH] Impossibile aggiungere reaction stop: {e}")
         say("Ok, mi zitto su questo thread. :zipper_mouth_face:", thread_ts=thread_ts)
         return True
+    finally:
+        conn.close()
+
+
+@app.action(TRASH_STOP_ACTION_ID)
+def handle_trash_stop_button(ack, body, client):
+    """Gestisce il bottone Block Kit 'Zitto' nei thread auto-engage."""
+    ack()
+
+    action = (body.get("actions") or [{}])[0]
+    try:
+        value = json.loads(action.get("value") or "{}")
+    except Exception:
+        value = {}
+
+    channel = value.get("channel") or body.get("channel", {}).get("id")
+    thread_ts = value.get("thread_ts") or body.get("message", {}).get("thread_ts")
+    message_ts = body.get("message", {}).get("ts")
+    user_id = body.get("user", {}).get("id")
+
+    if not channel or not thread_ts:
+        logger.warning("[TRASH] Stop button senza channel/thread_ts")
+        return
+
+    conn, cursor = db_connect(database_path)
+    try:
+        if not _is_trash_channel(channel, cursor):
+            return
+
+        cursor.execute(
+            "SELECT engaged, stopped FROM trash_engaged_threads WHERE thread_ts = ? AND channel = ?",
+            (thread_ts, channel),
+        )
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            logger.info(f"[TRASH] Stop button ignorato: thread {thread_ts} non engaged")
+            return
+
+        if row[1]:
+            logger.info(f"[TRASH] Stop button su thread gia stoppato: {thread_ts}")
+            return
+
+        cursor.execute(
+            "UPDATE trash_engaged_threads SET stopped = 1 "
+            "WHERE thread_ts = ? AND channel = ?",
+            (thread_ts, channel),
+        )
+        conn.commit()
+        logger.info(f"[TRASH] Thread {thread_ts} stoppato da bottone da user {user_id}")
+
+        if message_ts:
+            try:
+                client.reactions_add(
+                    channel=channel,
+                    timestamp=message_ts,
+                    name="zipper_mouth_face",
+                )
+            except Exception as e:
+                logger.warning(f"[TRASH] Impossibile aggiungere reaction stop button: {e}")
+
+        client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text="Ok, mi zitto su questo thread. :zipper_mouth_face:",
+        )
+    except Exception as e:
+        logger.error(f"[TRASH] Errore stop button: {e}")
+        logger.error(traceback.format_exc())
     finally:
         conn.close()
 
@@ -1732,8 +1906,7 @@ def maybe_auto_engage_trash(message, say):
 
                 if engage and reply:
                     logger.info(f"[TRASH] Engaging thread {thread_ts}")
-                    reply += STOP_HINT_SUFFIX_TEMPLATE.format(bot_id=bot_user_id)
-                    say(reply, thread_ts=thread_ts)
+                    _say_trash_auto_reply(say, reply, channel, thread_ts)
                 else:
                     logger.info(f"[TRASH] Pass su thread {thread_ts}")
                 return
