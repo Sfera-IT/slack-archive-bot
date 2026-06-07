@@ -1582,6 +1582,11 @@ def _engaged_stop_text_fallback():
     return STOP_HINT_SUFFIX_TEMPLATE.format(bot_id=app._bot_user_id)
 
 
+def _engaged_stop_ack_text(user_id=None):
+    actor = f" grazie a <@{user_id}>" if user_id else ""
+    return f"Ok, mi zittisco su questo thread{actor}. :zipper_mouth_face:"
+
+
 def _engaged_stop_button_blocks(reply, channel, thread_ts):
     """Crea i blocchi Slack per le risposte dei thread ingaggiati con bottone stop."""
     payload = json.dumps({"channel": channel, "thread_ts": thread_ts})
@@ -1857,6 +1862,7 @@ def _maybe_handle_engaged_stop(message, say):
     channel = message.get("channel")
     text = message.get("text", "") or ""
     bot_user_id = app._bot_user_id
+    user_id = message.get("user")
 
     # Solo reply in thread: lo stop agisce sul thread già ingaggiato.
     if not thread_ts or thread_ts == ts:
@@ -1887,7 +1893,7 @@ def _maybe_handle_engaged_stop(message, say):
             app.client.reactions_add(channel=channel, timestamp=ts, name="zipper_mouth_face")
         except Exception as e:
             logger.warning(f"[ENGAGE] Impossibile aggiungere reaction stop: {e}")
-        say("Ok, mi zitto su questo thread. :zipper_mouth_face:", thread_ts=thread_ts)
+        say(_engaged_stop_ack_text(user_id), thread_ts=thread_ts)
         return True
     finally:
         conn.close()
@@ -1949,7 +1955,7 @@ def handle_engaged_stop_button(ack, body, client):
         client.chat_postMessage(
             channel=channel,
             thread_ts=thread_ts,
-            text="Ok, mi zitto su questo thread. :zipper_mouth_face:",
+            text=_engaged_stop_ack_text(user_id),
         )
     except Exception as e:
         logger.error(f"[ENGAGE] Errore stop button: {e}")
