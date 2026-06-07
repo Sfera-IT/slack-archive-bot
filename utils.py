@@ -359,6 +359,33 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Tabella generica per thread ingaggiati esplicitamente con @bot /engage.
+    # Non riusa trash_engaged_threads per evitare che vecchi auto-engage su #trash restino attivi.
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS engaged_threads (
+                thread_ts TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                engaged INTEGER NOT NULL DEFAULT 1,
+                stopped INTEGER NOT NULL DEFAULT 0,
+                engaged_at REAL NOT NULL,
+                engaged_by TEXT,
+                last_reply_ts TEXT,
+                PRIMARY KEY (thread_ts, channel)
+            )
+        """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_engaged_threads_engaged_at
+            ON engaged_threads(engaged_at)
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
     # Migrazione: se la colonna timestamp è TEXT, la convertiamo in REAL
     try:
         cursor.execute("PRAGMA table_info(ai_requests)")

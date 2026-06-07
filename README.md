@@ -109,6 +109,23 @@ to the query.  The full usage is:
             or desc if you want to start from the newest. Default asc.
         limit: The number of responses to return. Default 10.
 
+## AI thread engagement
+
+Mentioning the bot normally keeps the default one-shot behavior: it replies once
+using the current thread or channel context.
+
+To keep the bot engaged in a thread, mention it with:
+
+        @ArchiveBot /engage
+
+From that point on, the bot replies to every new user message in that thread,
+on any channel. To stop it, use the `Zitto` button or mention the bot with
+`stop`, for example:
+
+        @ArchiveBot stop
+
+Sending `@ArchiveBot /engage` again in the same thread reactivates it.
+
 
 ## Migrating from slack-archive-bot v0.1
 

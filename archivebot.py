@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from slack_bolt import App
 from openai import OpenAI
 
-from ai_context import format_messages_for_prompt, get_ai_context_scope
+from ai_context import format_messages_for_prompt, get_ai_context_scope, is_engage_request
 from utils import db_connect, migrate_db
 from url_cleaner import UrlCleaner
 from sferait_context import (
@@ -85,14 +85,14 @@ app = App(
 
 CHANNEL_RECAP_MESSAGE_LIMIT = 1000
 
-# Auto-engagement solo su #trash
+# Auto-engagement storico su #trash: lasciato nel codice per compatibilità, ma non viene più chiamato.
 TRASH_CHANNEL_NAMES = ["trash"]
 AUTO_ENGAGE_REPLY_THRESHOLD = 3       # reply count nel thread che triggera la decisione di engage
 AUTO_CLOWN_USER_REPLY_THRESHOLD = 8   # reply degli UTENTI nel thread engaged per valutare auto-clown
 AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage nei canali auto-engage
 AUTO_ENGAGE_DECISION_MODEL = "gpt-4o-mini"
 STOP_HINT_SUFFIX_TEMPLATE = "\n\n_per fermarmi: `<@{bot_id}> stop`_"
-TRASH_STOP_ACTION_ID = "trash_stop_thread"
+ENGAGED_THREAD_STOP_ACTION_ID = "trash_stop_thread"  # legacy action_id: non cambiarlo, i bottoni esistenti lo usano.
 
 # URL cleaner instance loading local rules
 _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "url_rules.json"))
@@ -852,16 +852,18 @@ def handle_message(message, say):
     # Intercetta anche stop testuali copiati male dal suggerimento Slack
     # (es. _`@slack-archive-bot stop`_), che non generano una mention nativa.
     try:
-        if _maybe_handle_trash_stop(message, say):
+        if _maybe_handle_engaged_stop(message, say):
             return
     except Exception as e:
-        logger.error(f"[TRASH] Errore intercept stop: {e}")
+        logger.error(f"[ENGAGE] Errore intercept stop: {e}")
         logger.error(traceback.format_exc())
 
     if bot_user_id and f"<@{bot_user_id}>" in text:
         logger.info(f"[AI] Bot mentioned in message (via handle_message) by user {user_id}")
-        # Gestisci la menzione
+        # @bot /engage ingaggia il thread; una mention normale resta one-shot.
         try:
+            if _maybe_handle_engage_command(message, say):
+                return
             handle_app_mention(message, say)
             return
         except Exception as e:
@@ -996,11 +998,11 @@ def handle_message(message, say):
 
         conn.close()
 
-        # Auto-engagement su #trash (solo reply in thread, gestito internamente)
+        # Reply continuo solo nei thread ingaggiati esplicitamente con @bot /engage.
         try:
-            maybe_auto_engage_trash(message, say)
+            maybe_reply_to_engaged_thread(message, say)
         except Exception as e:
-            logger.error(f"[TRASH] Eccezione non gestita in maybe_auto_engage_trash: {e}")
+            logger.error(f"[ENGAGE] Eccezione non gestita in maybe_reply_to_engaged_thread: {e}")
             logger.error(traceback.format_exc())
 
     logger.debug("--------------------------")
@@ -1576,12 +1578,12 @@ def _strip_bot_self_prefix(text):
     return text.strip()
 
 
-def _trash_stop_text_fallback():
+def _engaged_stop_text_fallback():
     return STOP_HINT_SUFFIX_TEMPLATE.format(bot_id=app._bot_user_id)
 
 
-def _trash_stop_button_blocks(reply, channel, thread_ts):
-    """Crea i blocchi Slack per le risposte auto-engage con bottone di stop."""
+def _engaged_stop_button_blocks(reply, channel, thread_ts):
+    """Crea i blocchi Slack per le risposte dei thread ingaggiati con bottone stop."""
     payload = json.dumps({"channel": channel, "thread_ts": thread_ts})
     return [
         {
@@ -1602,7 +1604,7 @@ def _trash_stop_button_blocks(reply, channel, thread_ts):
                         "emoji": True,
                     },
                     "style": "danger",
-                    "action_id": TRASH_STOP_ACTION_ID,
+                    "action_id": ENGAGED_THREAD_STOP_ACTION_ID,
                     "value": payload,
                 }
             ],
@@ -1612,20 +1614,32 @@ def _trash_stop_button_blocks(reply, channel, thread_ts):
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": _trash_stop_text_fallback().strip(),
+                    "text": _engaged_stop_text_fallback().strip(),
                 }
             ],
         },
     ]
 
 
-def _say_trash_auto_reply(say, reply, channel, thread_ts):
-    """Posta una risposta auto-engage con fallback testuale e bottone stop."""
+def _say_engaged_thread_reply(say, reply, channel, thread_ts):
+    """Posta una risposta in un thread ingaggiato con fallback testuale e bottone stop."""
     say(
-        text=reply + _trash_stop_text_fallback(),
-        blocks=_trash_stop_button_blocks(reply, channel, thread_ts),
+        text=reply + _engaged_stop_text_fallback(),
+        blocks=_engaged_stop_button_blocks(reply, channel, thread_ts),
         thread_ts=thread_ts,
     )
+
+
+def _trash_stop_text_fallback():
+    return _engaged_stop_text_fallback()
+
+
+def _trash_stop_button_blocks(reply, channel, thread_ts):
+    return _engaged_stop_button_blocks(reply, channel, thread_ts)
+
+
+def _say_trash_auto_reply(say, reply, channel, thread_ts):
+    _say_engaged_thread_reply(say, reply, channel, thread_ts)
 
 
 def _normalize_trash_stop_text(text):
@@ -1761,7 +1775,7 @@ def _auto_reply_in_thread(channel, thread_ts, thread_messages, openai_client, sa
     reply = (resp.choices[0].message.content or "").strip()
     reply = _strip_bot_self_prefix(reply)
     if reply:
-        _say_trash_auto_reply(say, reply, channel, thread_ts)
+        _say_engaged_thread_reply(say, reply, channel, thread_ts)
 
 
 _STOP_KEYWORD_RE = re.compile(
@@ -1770,9 +1784,73 @@ _STOP_KEYWORD_RE = re.compile(
 )
 
 
-def _maybe_handle_trash_stop(message, say):
-    """Se il messaggio è una mention al bot in un thread engaged di #trash con
-    testo 'stop' (o equivalente), marca il thread come stopped e ritorna True.
+def _thread_ts_for_engagement(message):
+    """Restituisce il thread target per /engage: thread esistente o root message."""
+    return message.get("thread_ts") or message.get("ts")
+
+
+def _maybe_handle_engage_command(message, say):
+    """Gestisce @bot /engage e attiva/riattiva il bot sul thread corrente."""
+    bot_user_id = app._bot_user_id
+    text = message.get("text", "") or ""
+    channel = message.get("channel")
+    message_ts = message.get("ts")
+    thread_ts = _thread_ts_for_engagement(message)
+    user_id = message.get("user", "")
+
+    if not channel or not message_ts or not thread_ts:
+        return False
+
+    if not is_engage_request(text, bot_user_id):
+        return False
+
+    conn, cursor = db_connect(database_path)
+    try:
+        cursor.execute(
+            """
+            SELECT engaged, stopped, last_reply_ts
+            FROM engaged_threads
+            WHERE thread_ts = ? AND channel = ?
+            """,
+            (thread_ts, channel),
+        )
+        row = cursor.fetchone()
+        if row and row[2] == message_ts:
+            logger.info(f"[ENGAGE] Duplicate /engage event ignored for thread {thread_ts}")
+            return True
+
+        was_stopped = bool(row[1]) if row else False
+        now_ts = datetime.now().timestamp()
+        cursor.execute(
+            """
+            INSERT INTO engaged_threads
+            (thread_ts, channel, engaged, stopped, engaged_at, engaged_by, last_reply_ts)
+            VALUES (?, ?, 1, 0, ?, ?, ?)
+            ON CONFLICT(thread_ts, channel) DO UPDATE SET
+                engaged = 1,
+                stopped = 0,
+                engaged_at = excluded.engaged_at,
+                engaged_by = excluded.engaged_by,
+                last_reply_ts = excluded.last_reply_ts
+            """,
+            (thread_ts, channel, now_ts, user_id, message_ts),
+        )
+        conn.commit()
+
+        logger.info(
+            f"[ENGAGE] Thread {thread_ts} engaged in channel {channel} by user {user_id}"
+        )
+        if was_stopped:
+            say("Riattivato. Da ora rispondo a ogni nuovo messaggio in questo thread.", thread_ts=thread_ts)
+        else:
+            say("Ok, resto ingaggiato su questo thread. Per fermarmi: `<@{}> stop`".format(bot_user_id), thread_ts=thread_ts)
+        return True
+    finally:
+        conn.close()
+
+
+def _maybe_handle_engaged_stop(message, say):
+    """Se il messaggio chiede stop in un thread engaged, marca il thread come stopped.
     Altrimenti ritorna False."""
     thread_ts = message.get("thread_ts")
     ts = message.get("ts")
@@ -1780,7 +1858,7 @@ def _maybe_handle_trash_stop(message, say):
     text = message.get("text", "") or ""
     bot_user_id = app._bot_user_id
 
-    # Solo reply in thread (no root, no DM, no canali random)
+    # Solo reply in thread: lo stop agisce sul thread già ingaggiato.
     if not thread_ts or thread_ts == ts:
         return False
 
@@ -1789,11 +1867,8 @@ def _maybe_handle_trash_stop(message, say):
 
     conn, cursor = db_connect(database_path)
     try:
-        if not _is_trash_channel(channel, cursor):
-            return False
-
         cursor.execute(
-            "SELECT engaged FROM trash_engaged_threads WHERE thread_ts = ? AND channel = ?",
+            "SELECT engaged FROM engaged_threads WHERE thread_ts = ? AND channel = ?",
             (thread_ts, channel),
         )
         row = cursor.fetchone()
@@ -1802,25 +1877,25 @@ def _maybe_handle_trash_stop(message, say):
             return False
 
         cursor.execute(
-            "UPDATE trash_engaged_threads SET stopped = 1 "
+            "UPDATE engaged_threads SET stopped = 1 "
             "WHERE thread_ts = ? AND channel = ?",
             (thread_ts, channel),
         )
         conn.commit()
-        logger.info(f"[TRASH] Thread {thread_ts} stoppato su richiesta utente")
+        logger.info(f"[ENGAGE] Thread {thread_ts} stopped by user request")
         try:
             app.client.reactions_add(channel=channel, timestamp=ts, name="zipper_mouth_face")
         except Exception as e:
-            logger.warning(f"[TRASH] Impossibile aggiungere reaction stop: {e}")
+            logger.warning(f"[ENGAGE] Impossibile aggiungere reaction stop: {e}")
         say("Ok, mi zitto su questo thread. :zipper_mouth_face:", thread_ts=thread_ts)
         return True
     finally:
         conn.close()
 
 
-@app.action(TRASH_STOP_ACTION_ID)
-def handle_trash_stop_button(ack, body, client):
-    """Gestisce il bottone Block Kit 'Zitto' nei thread auto-engage."""
+@app.action(ENGAGED_THREAD_STOP_ACTION_ID)
+def handle_engaged_stop_button(ack, body, client):
+    """Gestisce il bottone Block Kit 'Zitto' nei thread ingaggiati."""
     ack()
 
     action = (body.get("actions") or [{}])[0]
@@ -1835,34 +1910,31 @@ def handle_trash_stop_button(ack, body, client):
     user_id = body.get("user", {}).get("id")
 
     if not channel or not thread_ts:
-        logger.warning("[TRASH] Stop button senza channel/thread_ts")
+        logger.warning("[ENGAGE] Stop button senza channel/thread_ts")
         return
 
     conn, cursor = db_connect(database_path)
     try:
-        if not _is_trash_channel(channel, cursor):
-            return
-
         cursor.execute(
-            "SELECT engaged, stopped FROM trash_engaged_threads WHERE thread_ts = ? AND channel = ?",
+            "SELECT engaged, stopped FROM engaged_threads WHERE thread_ts = ? AND channel = ?",
             (thread_ts, channel),
         )
         row = cursor.fetchone()
         if not row or not row[0]:
-            logger.info(f"[TRASH] Stop button ignorato: thread {thread_ts} non engaged")
+            logger.info(f"[ENGAGE] Stop button ignored: thread {thread_ts} not engaged")
             return
 
         if row[1]:
-            logger.info(f"[TRASH] Stop button su thread gia stoppato: {thread_ts}")
+            logger.info(f"[ENGAGE] Stop button on already stopped thread: {thread_ts}")
             return
 
         cursor.execute(
-            "UPDATE trash_engaged_threads SET stopped = 1 "
+            "UPDATE engaged_threads SET stopped = 1 "
             "WHERE thread_ts = ? AND channel = ?",
             (thread_ts, channel),
         )
         conn.commit()
-        logger.info(f"[TRASH] Thread {thread_ts} stoppato da bottone da user {user_id}")
+        logger.info(f"[ENGAGE] Thread {thread_ts} stopped by button from user {user_id}")
 
         if message_ts:
             try:
@@ -1872,7 +1944,7 @@ def handle_trash_stop_button(ack, body, client):
                     name="zipper_mouth_face",
                 )
             except Exception as e:
-                logger.warning(f"[TRASH] Impossibile aggiungere reaction stop button: {e}")
+                logger.warning(f"[ENGAGE] Impossibile aggiungere reaction stop button: {e}")
 
         client.chat_postMessage(
             channel=channel,
@@ -1880,10 +1952,62 @@ def handle_trash_stop_button(ack, body, client):
             text="Ok, mi zitto su questo thread. :zipper_mouth_face:",
         )
     except Exception as e:
-        logger.error(f"[TRASH] Errore stop button: {e}")
+        logger.error(f"[ENGAGE] Errore stop button: {e}")
         logger.error(traceback.format_exc())
     finally:
         conn.close()
+
+
+def maybe_reply_to_engaged_thread(message, say):
+    """Risponde a ogni nuovo messaggio utente nei thread ingaggiati con @bot /engage."""
+    try:
+        thread_ts = message.get("thread_ts")
+        ts = message.get("ts")
+        channel = message.get("channel")
+        msg_user = message.get("user")
+
+        if msg_user == app._bot_user_id:
+            return
+
+        if not thread_ts or thread_ts == ts:
+            return
+
+        conn, cursor = db_connect(database_path)
+        try:
+            cursor.execute(
+                "SELECT engaged, stopped FROM engaged_threads WHERE thread_ts = ? AND channel = ?",
+                (thread_ts, channel),
+            )
+            row = cursor.fetchone()
+            if not row or not row[0] or row[1]:
+                return
+        finally:
+            conn.close()
+
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            logger.warning("[ENGAGE] OPENAI_API_KEY non configurata, skip engaged reply")
+            return
+
+        thread_messages = get_thread_messages(channel, thread_ts)
+        if not thread_messages:
+            return
+
+        client = OpenAI(api_key=openai_api_key)
+        _auto_reply_in_thread(channel, thread_ts, thread_messages, client, say)
+
+        conn, cursor = db_connect(database_path)
+        try:
+            cursor.execute(
+                "UPDATE engaged_threads SET last_reply_ts = ? WHERE thread_ts = ? AND channel = ?",
+                (ts, thread_ts, channel),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"[ENGAGE] Errore engaged reply: {e}")
+        logger.error(traceback.format_exc())
 
 
 def maybe_auto_engage_trash(message, say):
@@ -2071,6 +2195,8 @@ def maybe_auto_engage_trash(message, say):
 def handle_app_mention_event(event, say):
     """Handler per l'evento app_mention da Slack."""
     logger.info(f"[AI] Received app_mention event: {event}")
+    if _maybe_handle_engage_command(event, say):
+        return
     handle_app_mention(event, say)
 
 
