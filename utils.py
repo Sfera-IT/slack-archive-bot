@@ -309,6 +309,35 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Tabella per tracciare gli alert xcancel (per cancellarli se il messaggio parent viene cancellato/modificato)
+    try:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS xcancel_alerts (
+                parent_message_ts TEXT NOT NULL,
+                alert_message_ts TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                alert_text TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (parent_message_ts, channel)
+            )
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
+    # Aggiungi il testo atteso agli alert xcancel esistenti per gestire update idempotenti.
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE xcancel_alerts
+            ADD COLUMN alert_text TEXT NOT NULL DEFAULT ''
+            """
+        )
+        conn.commit()
+    except:
+        pass
+
     # Tabella per tracciare i thread su #trash in cui il bot si è auto-ingaggiato
     try:
         cursor.execute(
