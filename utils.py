@@ -98,6 +98,37 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Index hot read/write paths. Keep this set small: these match existing
+    # filters and joins used by archive browsing, search, stats, and link checks.
+    for index_sql in [
+        """
+        CREATE INDEX IF NOT EXISTS idx_messages_thread_channel
+        ON messages(thread_ts, channel)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_messages_user
+        ON messages(user)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_messages_timestamp
+        ON messages(timestamp)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_messages_embedded_timestamp
+        ON messages(timestamp)
+        WHERE embeddings IS NOT NULL
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_members_channel_user
+        ON members(channel, user)
+        """,
+    ]:
+        try:
+            cursor.execute(index_sql)
+            conn.commit()
+        except:
+            pass
+
     # digests table
     try:
         cursor.execute(
@@ -303,6 +334,17 @@ def migrate_db(conn, cursor):
                 channel TEXT NOT NULL,
                 PRIMARY KEY (parent_message_ts, channel)
             )
+        """
+        )
+        conn.commit()
+    except:
+        pass
+
+    try:
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_posted_links_normalized_posted_date
+            ON posted_links(normalized_url, posted_date)
         """
         )
         conn.commit()
