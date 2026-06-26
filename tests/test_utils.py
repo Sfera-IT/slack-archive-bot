@@ -26,3 +26,26 @@ def test_migrate_db_creates_xcancel_alerts_table():
         "channel",
         "alert_text",
     }
+
+
+def test_migrate_db_creates_hot_path_indexes():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+
+    migrate_db(conn, cursor)
+
+    indexes = {
+        row[1]
+        for row in cursor.execute(
+            "SELECT type, name FROM sqlite_master WHERE type = 'index'"
+        ).fetchall()
+    }
+
+    assert {
+        "idx_messages_thread_channel",
+        "idx_messages_user",
+        "idx_messages_timestamp",
+        "idx_messages_embedded_timestamp",
+        "idx_members_channel_user",
+        "idx_posted_links_normalized_posted_date",
+    }.issubset(indexes)
