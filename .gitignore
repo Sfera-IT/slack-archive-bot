@@ -4,5 +4,6 @@ export
 /README_LOCAL_TESTING.md
 /.vscode
 /.venv
+/.uv-cache
 /.idea
 /.DS_Store
