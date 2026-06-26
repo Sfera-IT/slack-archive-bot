@@ -6,7 +6,7 @@ further back than 10,000 messages.
 ## Requirements
 
 1. Permission to install new apps to your Slack workspace.
-2. python3
+2. Python 3.11 or newer. [uv](https://docs.astral.sh/uv/) can install and manage it.
 3. A publicly accessible URL to serve the bot from. (Slack recommends using [ngrok](https://ngrok.com/) to get around this.)
 
 ## Installation
@@ -14,13 +14,13 @@ further back than 10,000 messages.
 1. Clone this repo.
 2. Install the requirements:
 
-        pip install -r requirements.txt
+        uv sync
 
 3. If you want to include your existing slack messages, [export your team's slack history.](https://get.slack.help/hc/en-us/articles/201658943-Export-your-team-s-Slack-history)
 Download the archive and export it to a directory. Then run `import.py`
 on the directory.  For example:
 
-        python import.py export
+        uv run python utilities/import.py export
 
     This will create a file `slack.sqlite`.
     
@@ -39,12 +39,12 @@ on the directory.  For example:
 
 5. Start slack-archive-bot with:
 
-        SLACK_BOT_TOKEN=<BOT_TOKEN> SLACK_SIGNING_SECRET=<SIGNING_SECRET> python archivebot.py
+        SLACK_BOT_TOKEN=<BOT_TOKEN> SLACK_SIGNING_SECRET=<SIGNING_SECRET> uv run python archivebot.py
 
 Where `SIGNING_SECRET` is the "Signing Secret" from your app's "Basic Information" page and `BOT_TOKEN` is the
 "Bot User OAuth Access Token" from the app's "OAuth & Permissions" page.
 
-Use `python archivebot.py -h` for a list of all command line options.
+Use `uv run python archivebot.py -h` for a list of all command line options.
 
 6. Go to the app's "Event Subscriptions" page and add the url to where slack-archive-bot is being served. The default port is `3333`. (i.e. `http://<ip>:3333/slack/events`)
 
@@ -76,10 +76,10 @@ docker run -e SLACK_BOT_TOKEN=<BOT_TOKEN> -e SLACK_SIGNING_SECRET=<SIGNING_SECRE
 
 ## Deploying Production Server Using WSGI
 
-By default when you run `python archivebot.py` it will launch a development server. But they don't recommend using it in production. The following is an example of using
+By default when you run `uv run python archivebot.py` it will launch a development server. But they don't recommend using it in production. The following is an example of using
 Flask and Gunicorn to deploy slack-archive-bot, but it should work equally well with any other WSGI server. 
 
-1. `SLACK_BOT_TOKEN=<BOT_TOKEN> SLACK_SIGNING_SECRET=<SIGNING_SECRET> gunicorn flask_app:flask_app -c gunicorn_conf.py <other gunicorn args>`
+1. `SLACK_BOT_TOKEN=<BOT_TOKEN> SLACK_SIGNING_SECRET=<SIGNING_SECRET> uv run gunicorn flask_app:flask_app -c gunicorn_conf.py <other gunicorn args>`
 2. `flask_app.py` provides a thin wrapper around `archivebot.app` using `slack_bolt.adapter.flask.SlackRequestHandler`. There are many other adapters provided by bolt. To use them, simply `from archivebot import app` and wrap `app`.
 3. `gunicorn_conf.py` ensures that the local database is updated when the server is started, but that it's not run for each worker.
 4. You can use `ARCHIVE_BOT_LOG_LEVEL` and `ARCHIVE_BOT_DATABASE_PATH` to configure slack-archive-bot while running it via gunicorn. 
