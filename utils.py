@@ -506,6 +506,63 @@ def migrate_db(conn, cursor):
 
 
 
+def claim_xcancel_alert(cursor, parent_ts, channel, alert_text):
+    """Riserva atomicamente lo slot dell'alert xcancel per (parent_ts, channel).
+
+    Sfrutta la PRIMARY KEY (parent_message_ts, channel) con INSERT OR IGNORE:
+    solo il primo handler che processa il messaggio (evento message, message_changed
+    dell'unfurl o retry di Slack) acquisisce lo slot e deve postare l'alert.
+
+    Args:
+        cursor: Cursore SQLite su un DB già migrato.
+        parent_ts: Timestamp del messaggio che contiene i link x.com.
+        channel: Canale del messaggio.
+        alert_text: Testo dell'alert che verrà postato.
+
+    Returns:
+        bool: True se lo slot è stato riservato da questa chiamata, False se
+        un alert per lo stesso messaggio è già tracciato o in corso di post.
+    """
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO xcancel_alerts
+        (parent_message_ts, alert_message_ts, channel, alert_text)
+        VALUES (?, '', ?, ?)
+        """,
+        (parent_ts, channel, alert_text),
+    )
+    return cursor.rowcount == 1
+
+
+def finalize_xcancel_alert(cursor, parent_ts, alert_ts, channel, alert_text):
+    """Completa la riserva dell'alert xcancel con il ts del messaggio postato.
+
+    Aggiorna solo la riserva originale (alert_message_ts vuoto e stesso testo):
+    se nel frattempo la riserva è stata rimossa o sostituita (parent cancellato
+    o testo modificato durante il post), non tocca nulla.
+
+    Args:
+        cursor: Cursore SQLite su un DB già migrato.
+        parent_ts: Timestamp del messaggio che contiene i link x.com.
+        alert_ts: Timestamp dell'alert appena postato su Slack.
+        channel: Canale del messaggio.
+        alert_text: Testo con cui era stata acquisita la riserva.
+
+    Returns:
+        bool: True se la riserva è stata completata, False se non esiste più.
+    """
+    cursor.execute(
+        """
+        UPDATE xcancel_alerts
+        SET alert_message_ts = ?
+        WHERE parent_message_ts = ? AND channel = ?
+          AND alert_message_ts = '' AND alert_text = ?
+        """,
+        (alert_ts, parent_ts, channel, alert_text),
+    )
+    return cursor.rowcount == 1
+
+
 def db_connect(database_path):
     conn = sqlite3.connect(database_path)
     cursor = conn.cursor()
