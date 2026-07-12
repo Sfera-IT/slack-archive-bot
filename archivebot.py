@@ -17,9 +17,13 @@ from url_cleaner import UrlCleaner
 from xcancel import build_xcancel_response_text
 from link_enrichment import LinkEnrichmentWorker
 from link_duplicates import (
+    collect_deleted_message_alerts,
     deliver_duplicate_alert,
     extract_external_links,
+    finalize_stored_alert_cleanup,
     prepare_exact_duplicate_alert,
+    prepare_enriched_duplicate_alerts,
+    reconcile_edited_message_links,
 )
 from sferait_context import (
     SFERAIT_SYSTEM_PROMPT,
@@ -846,6 +850,73 @@ def check_and_store_links(message, permalink_dict, say):
     except Exception as e:
         logger.error(f"Error in check_and_store_links: {e}")
         logger.error(traceback.format_exc())
+    finally:
+        conn.close()
+
+
+def _cleanup_stored_duplicate_alerts(alerts):
+    if not alerts:
+        return
+    conn, _ = db_connect(database_path)
+    try:
+        for alert in alerts:
+            deleted = False
+            if alert.alert_message_ts:
+                try:
+                    app.client.chat_delete(
+                        channel=alert.current_channel,
+                        ts=alert.alert_message_ts,
+                    )
+                    deleted = True
+                except Exception as e:
+                    logger.warning(
+                        "Could not delete obsolete duplicate alert %s: %s",
+                        alert.alert_message_ts,
+                        e,
+                    )
+            finalize_stored_alert_cleanup(conn, alert, deleted=deleted)
+    finally:
+        conn.close()
+
+
+def process_ready_link_document(_normalized_url):
+    """Evaluate all ready unchecked public links after a document completes."""
+    try:
+        threshold = float(os.getenv("LINK_TOPIC_SIMILARITY_THRESHOLD", "0.92"))
+    except ValueError:
+        logger.warning("Invalid LINK_TOPIC_SIMILARITY_THRESHOLD; using 0.92")
+        threshold = 0.92
+    if not 0.0 <= threshold <= 1.0:
+        logger.warning("Out-of-range LINK_TOPIC_SIMILARITY_THRESHOLD; using 0.92")
+        threshold = 0.92
+
+    conn, _ = db_connect(database_path)
+    try:
+        claims = prepare_enriched_duplicate_alerts(
+            conn,
+            similarity_threshold=threshold,
+        )
+        for claim in claims:
+            try:
+                deliver_duplicate_alert(
+                    conn,
+                    claim,
+                    post=lambda text, thread_ts, alert_claim=claim: app.client.chat_postMessage(
+                        channel=alert_claim.current_channel,
+                        text=text,
+                        thread_ts=thread_ts,
+                    ),
+                    delete=lambda alert_channel, alert_ts: app.client.chat_delete(
+                        channel=alert_channel,
+                        ts=alert_ts,
+                    ),
+                )
+            except Exception:
+                logger.error(
+                    "Failed to deliver enriched duplicate alert for %s",
+                    claim.current_message_ts,
+                    exc_info=True,
+                )
     finally:
         conn.close()
 
@@ -2330,16 +2401,42 @@ def handle_message_changed(event, say):
             handle_message_deleted_logic(deleted_ts, event.get("channel"))
         return
 
+    links = extract_external_links(message.get("text", ""), normalize_url)
     conn, cursor = db_connect(database_path)
     try:
         cursor.execute(
-            "UPDATE messages SET message = ? WHERE user = ? AND channel = ? AND timestamp = ?",
-            (message["text"], message["user"], event["channel"], message["ts"]),
+            """
+            UPDATE messages SET message = ?, embeddings = ?
+            WHERE user = ? AND channel = ? AND timestamp = ?
+            """,
+            (
+                message["text"],
+                create_embeddings(message["text"]),
+                message["user"],
+                event["channel"],
+                message["ts"],
+            ),
+        )
+        obsolete_alerts = reconcile_edited_message_links(
+            conn,
+            channel=event["channel"],
+            message_timestamp=message["ts"],
+            active_normalized_urls={link.normalized_url for link in links},
         )
         conn.commit()
     finally:
         conn.close()
 
+    _cleanup_stored_duplicate_alerts(obsolete_alerts)
+    permalink = {"permalink": ""}
+    try:
+        permalink = app.client.chat_getPermalink(
+            channel=event["channel"],
+            message_ts=message["ts"],
+        )
+    except Exception as e:
+        logger.warning(f"Could not get permalink for edited message: {e}")
+    check_and_store_links(message, permalink, say)
     sync_xcancel_alternatives_for_message(message, say)
 
 
@@ -2348,6 +2445,17 @@ def handle_message_deleted_logic(deleted_ts, channel):
     if not deleted_ts:
         logger.warning("MESSAGE_DELETED: No deleted_ts provided, skipping cleanup")
         return
+
+    link_conn, _ = db_connect(database_path)
+    try:
+        obsolete_alerts = collect_deleted_message_alerts(
+            link_conn,
+            channel=channel,
+            message_timestamp=deleted_ts,
+        )
+    finally:
+        link_conn.close()
+    _cleanup_stored_duplicate_alerts(obsolete_alerts)
 
     conn, cursor = db_connect(database_path)
 
@@ -2469,8 +2577,27 @@ def start_link_enrichment_worker():
     if enabled not in {"1", "true", "yes", "on"}:
         logger.info("Link enrichment worker disabled")
         return None
+
+    def positive_env_float(name, default):
+        try:
+            value = float(os.getenv(name, str(default)))
+            if value <= 0:
+                raise ValueError
+            return value
+        except ValueError:
+            logger.warning("Invalid %s; using %s", name, default)
+            return default
+
     if _link_enrichment_worker is None:
-        _link_enrichment_worker = LinkEnrichmentWorker(database_path, create_embeddings)
+        _link_enrichment_worker = LinkEnrichmentWorker(
+            database_path,
+            create_embeddings,
+            on_document_ready=process_ready_link_document,
+            poll_interval=positive_env_float("LINK_ENRICHMENT_POLL_SECONDS", 2.0),
+            error_backoff=positive_env_float(
+                "LINK_ENRICHMENT_ERROR_BACKOFF_SECONDS", 5.0
+            ),
+        )
     _link_enrichment_worker.start()
     return _link_enrichment_worker
 

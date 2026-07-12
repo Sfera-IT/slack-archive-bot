@@ -4,6 +4,7 @@ import sys
 import tempfile
 
 import pytest
+import numpy as np
 
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
@@ -11,11 +12,17 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from link_duplicates import (
+    DuplicateMatch,
+    claim_duplicate_alert,
+    collect_deleted_message_alerts,
     deliver_duplicate_alert,
     ExternalLink,
     extract_external_links,
     finalize_duplicate_alert,
+    finalize_stored_alert_cleanup,
+    prepare_enriched_duplicate_alerts,
     prepare_exact_duplicate_alert,
+    reconcile_edited_message_links,
     release_duplicate_alert,
 )
 import link_duplicates as link_duplicates_module
@@ -58,6 +65,46 @@ def add_link(
         posted_at=float(message_ts) if posted_at is None else posted_at,
         now=float(message_ts) if posted_at is None else posted_at,
     )
+    conn.execute(
+        """
+        UPDATE message_links SET deterministic_checked_at = posted_at
+        WHERE channel = ? AND message_timestamp = ? AND normalized_url = ?
+        """,
+        (channel, message_ts, normalized_url),
+    )
+    conn.commit()
+
+
+def complete_document(
+    conn,
+    normalized_url,
+    *,
+    content,
+    content_hash,
+    embedding,
+    quality="full_text",
+):
+    conn.execute(
+        """
+        UPDATE link_documents SET
+            content = ?, content_hash = ?, embedding = ?,
+            extraction_quality = ?, fetch_status = 'complete',
+            fetched_at = 1, expires_at = 999999999
+        WHERE normalized_url = ?
+        """,
+        (
+            content,
+            content_hash,
+            np.asarray(embedding, dtype=np.float32).tobytes(),
+            quality,
+            normalized_url,
+        ),
+    )
+    conn.execute(
+        "UPDATE link_enrichment_jobs SET status = 'complete' WHERE normalized_url = ?",
+        (normalized_url,),
+    )
+    conn.commit()
 
 
 def prepare(conn, *, channel="C2", message_ts="1000.2", thread_ts=None, links=None):
@@ -347,3 +394,467 @@ def test_interrupted_claim_is_fail_closed_against_repeated_delivery():
     assert first is not None
     assert second is None
     assert conn.execute("SELECT status FROM link_duplicate_alerts").fetchone()[0] == "claimed"
+
+
+def test_identical_extracted_content_precedes_semantic_similarity():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    add_link(
+        conn,
+        channel="C1",
+        message_ts="900.1",
+        thread_ts="900.1",
+        normalized_url="https://source.example/story",
+    )
+    add_link(
+        conn,
+        channel="C2",
+        message_ts="1000.2",
+        thread_ts="1000.2",
+        normalized_url="https://mirror.example/story",
+    )
+    complete_document(
+        conn,
+        "https://source.example/story",
+        content="Identical extracted article",
+        content_hash="same-hash",
+        embedding=[1.0, 0.0],
+    )
+    complete_document(
+        conn,
+        "https://mirror.example/story",
+        content="Identical extracted article",
+        content_hash="same-hash",
+        embedding=[0.0, 1.0],
+    )
+
+    claims = prepare_enriched_duplicate_alerts(conn, now=1100.0)
+
+    assert len(claims) == 1
+    assert claims[0].match_type == "same_content"
+    assert claims[0].score == 1.0
+    assert "URL diverso" in claims[0].text
+
+
+def test_high_similarity_different_urls_create_potential_story_claim():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    add_link(
+        conn,
+        channel="C1",
+        message_ts="900.1",
+        thread_ts="900.1",
+        normalized_url="https://one.example/report",
+    )
+    add_link(
+        conn,
+        channel="C2",
+        message_ts="1000.2",
+        thread_ts="1000.2",
+        normalized_url="https://two.example/report",
+    )
+    complete_document(
+        conn,
+        "https://one.example/report",
+        content="First report",
+        content_hash="first",
+        embedding=[1.0, 0.0],
+    )
+    complete_document(
+        conn,
+        "https://two.example/report",
+        content="Second report",
+        content_hash="second",
+        embedding=[0.99, 0.01],
+    )
+
+    claims = prepare_enriched_duplicate_alerts(
+        conn,
+        similarity_threshold=0.95,
+        now=1100.0,
+    )
+
+    assert len(claims) == 1
+    assert claims[0].match_type == "same_story"
+    assert claims[0].score > 0.99
+    assert "Potenzialmente" in claims[0].text
+    assert "fonte diversa" in claims[0].text
+
+
+def test_below_threshold_is_checked_without_alert():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    add_link(
+        conn,
+        channel="C1",
+        message_ts="900.1",
+        thread_ts="900.1",
+        normalized_url="https://one.example/report",
+    )
+    add_link(
+        conn,
+        channel="C2",
+        message_ts="1000.2",
+        thread_ts="1000.2",
+        normalized_url="https://two.example/report",
+    )
+    complete_document(conn, "https://one.example/report", content="One", content_hash="one", embedding=[1, 0])
+    complete_document(conn, "https://two.example/report", content="Two", content_hash="two", embedding=[0, 1])
+
+    assert prepare_enriched_duplicate_alerts(conn, similarity_threshold=0.95, now=1100.0) == []
+    checked = conn.execute(
+        "SELECT duplicate_checked_at FROM message_links WHERE channel = 'C2'"
+    ).fetchone()[0]
+    assert checked == 1100.0
+
+
+def test_private_channels_are_excluded_from_enriched_matching():
+    conn = migrated_connection()
+    add_channel(conn, "PRIVATE", private=True)
+    add_channel(conn, "PUBLIC")
+    add_link(
+        conn,
+        channel="PRIVATE",
+        message_ts="900.1",
+        thread_ts="900.1",
+        normalized_url="https://one.example/report",
+    )
+    add_link(
+        conn,
+        channel="PUBLIC",
+        message_ts="1000.2",
+        thread_ts="1000.2",
+        normalized_url="https://two.example/report",
+    )
+    complete_document(conn, "https://one.example/report", content="Same", content_hash="same", embedding=[1, 0])
+    complete_document(conn, "https://two.example/report", content="Same", content_hash="same", embedding=[1, 0])
+
+    assert prepare_enriched_duplicate_alerts(conn, now=1100.0) == []
+
+
+def test_out_of_order_enrichment_waits_for_pending_prior_document():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    add_link(
+        conn,
+        channel="C1",
+        message_ts="900.1",
+        thread_ts="900.1",
+        normalized_url="https://slow.example/report",
+    )
+    add_link(
+        conn,
+        channel="C2",
+        message_ts="1000.2",
+        thread_ts="1000.2",
+        normalized_url="https://fast.example/report",
+    )
+    complete_document(conn, "https://fast.example/report", content="Same", content_hash="same", embedding=[1, 0])
+
+    assert prepare_enriched_duplicate_alerts(conn, now=1050.0) == []
+    assert conn.execute(
+        "SELECT duplicate_checked_at FROM message_links WHERE channel = 'C2'"
+    ).fetchone()[0] is None
+
+    complete_document(conn, "https://slow.example/report", content="Same", content_hash="same", embedding=[1, 0])
+    claims = prepare_enriched_duplicate_alerts(conn, now=1100.0)
+    assert len(claims) == 1
+    assert claims[0].current_channel == "C2"
+
+
+def test_edit_removes_obsolete_link_alert_but_retains_shared_document():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    add_link(conn, channel="C1", message_ts="900.1", thread_ts="900.1")
+    claim = prepare(conn)
+    assert finalize_duplicate_alert(conn, claim, "1001.9") is True
+
+    alerts = reconcile_edited_message_links(
+        conn,
+        channel="C2",
+        message_timestamp="1000.2",
+        active_normalized_urls=set(),
+    )
+
+    assert alerts[0].alert_message_ts == "1001.9"
+    assert conn.execute("SELECT COUNT(*) FROM message_links WHERE channel = 'C2'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM link_documents").fetchone()[0] == 1
+    finalize_stored_alert_cleanup(conn, alerts[0], deleted=True)
+    assert conn.execute("SELECT COUNT(*) FROM link_duplicate_alerts").fetchone()[0] == 0
+
+
+def test_deleting_source_returns_dependent_alert_and_keeps_shared_cache():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    add_link(conn, channel="C1", message_ts="900.1", thread_ts="900.1")
+    claim = prepare(conn)
+    assert finalize_duplicate_alert(conn, claim, "1001.9") is True
+
+    alerts = collect_deleted_message_alerts(
+        conn,
+        channel="C1",
+        message_timestamp="900.1",
+    )
+
+    assert alerts == [
+        link_duplicates_module.StoredAlert("C2", "1000.2", "1001.9")
+    ]
+    assert conn.execute("SELECT COUNT(*) FROM message_links WHERE channel = 'C1'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM link_documents").fetchone()[0] == 1
+
+
+def test_editing_source_to_remove_link_returns_dependent_alert():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    add_link(conn, channel="C1", message_ts="900.1", thread_ts="900.1")
+    claim = prepare(conn)
+    assert finalize_duplicate_alert(conn, claim, "1001.9") is True
+
+    alerts = reconcile_edited_message_links(
+        conn,
+        channel="C1",
+        message_timestamp="900.1",
+        active_normalized_urls=set(),
+    )
+
+    assert alerts == [
+        link_duplicates_module.StoredAlert("C2", "1000.2", "1001.9")
+    ]
+    assert conn.execute("SELECT COUNT(*) FROM link_documents").fetchone()[0] == 1
+
+
+def test_full_45_day_candidate_set_finds_match_older_than_200_newer_links():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    target_url = "https://old.example/target"
+    add_link(
+        conn,
+        channel="C1",
+        message_ts="700.0",
+        thread_ts="700.0",
+        normalized_url=target_url,
+    )
+    complete_document(
+        conn,
+        target_url,
+        content="Target article",
+        content_hash="target-hash",
+        embedding=[1, 0],
+    )
+    for index in range(201):
+        timestamp = 701.0 + index
+        url = f"https://noise.example/{index}"
+        add_link(
+            conn,
+            channel="C1",
+            message_ts=str(timestamp),
+            thread_ts=str(timestamp),
+            normalized_url=url,
+        )
+        complete_document(
+            conn,
+            url,
+            content=f"Noise article {index}",
+            content_hash=f"noise-{index}",
+            embedding=[0, 1],
+        )
+    # Reinsert the old matching association after the noise rows so it lives
+    # beyond two 100-candidate rowid pages despite having the oldest timestamp.
+    conn.execute(
+        "DELETE FROM message_links WHERE channel = 'C1' AND message_timestamp = '700.0'"
+    )
+    conn.commit()
+    add_link(
+        conn,
+        channel="C1",
+        message_ts="700.0",
+        thread_ts="700.0",
+        normalized_url=target_url,
+    )
+    current_url = "https://new.example/target"
+    add_link(
+        conn,
+        channel="C2",
+        message_ts="1000.0",
+        thread_ts="1000.0",
+        normalized_url=current_url,
+    )
+    complete_document(
+        conn,
+        current_url,
+        content="Target article",
+        content_hash="target-hash",
+        embedding=[1, 0],
+    )
+    conn.execute(
+        "UPDATE message_links SET duplicate_checked_at = 1 WHERE channel = 'C1'"
+    )
+    conn.commit()
+
+    first = prepare_enriched_duplicate_alerts(
+        conn,
+        similarity_threshold=1.0,
+        now=1100.0,
+        max_current_rows=1,
+        max_candidate_comparisons=100,
+    )
+    assert first == []
+    assert conn.execute(
+        "SELECT duplicate_checked_at FROM message_links WHERE channel = 'C2'"
+    ).fetchone()[0] is None
+    assert conn.execute(
+        "SELECT candidate_after_rowid FROM link_match_scans"
+    ).fetchone()[0] > 0
+
+    second = prepare_enriched_duplicate_alerts(
+        conn,
+        similarity_threshold=1.0,
+        now=1101.0,
+        max_current_rows=1,
+        max_candidate_comparisons=100,
+    )
+    assert second == []
+    assert conn.execute(
+        "SELECT duplicate_checked_at FROM message_links WHERE channel = 'C2'"
+    ).fetchone()[0] is None
+
+    claims = prepare_enriched_duplicate_alerts(
+        conn,
+        similarity_threshold=1.0,
+        now=1102.0,
+        max_current_rows=1,
+        max_candidate_comparisons=100,
+    )
+
+    assert len(claims) == 1
+    assert claims[0].source_message_ts == "700.0"
+    assert claims[0].match_type == "same_content"
+
+
+@pytest.mark.parametrize("removed_side", ["current", "source"])
+def test_stale_scan_snapshot_cannot_claim_after_association_removal(removed_side):
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "stale-scan.sqlite")
+        scan_conn = migrated_connection(path)
+        add_channel(scan_conn, "C1")
+        add_channel(scan_conn, "C2")
+        source_url = "https://source.example/story"
+        current_url = "https://current.example/story"
+        add_link(
+            scan_conn,
+            channel="C1",
+            message_ts="900.0",
+            thread_ts="900.0",
+            normalized_url=source_url,
+        )
+        add_link(
+            scan_conn,
+            channel="C2",
+            message_ts="1000.0",
+            thread_ts="1000.0",
+            normalized_url=current_url,
+        )
+        stale_match = DuplicateMatch(
+            normalized_url=current_url,
+            source_normalized_url=source_url,
+            source_channel="C1",
+            source_message_ts="900.0",
+            source_thread_ts="900.0",
+            source_permalink="https://workspace.slack.com/source",
+            source_posted_at=900.0,
+        )
+
+        edit_conn = sqlite3.connect(path)
+        if removed_side == "current":
+            edit_conn.execute(
+                "DELETE FROM message_links WHERE channel = 'C2' AND message_timestamp = '1000.0'"
+            )
+        else:
+            edit_conn.execute(
+                "DELETE FROM message_links WHERE channel = 'C1' AND message_timestamp = '900.0'"
+            )
+        edit_conn.commit()
+
+        claim = claim_duplicate_alert(
+            scan_conn,
+            current_channel="C2",
+            current_message_ts="1000.0",
+            current_thread_ts="1000.0",
+            current_normalized_url=current_url,
+            match=stale_match,
+            match_type="same_story",
+            text="potential match",
+            score=0.99,
+            now=1100.0,
+        )
+
+        assert claim is None
+        assert scan_conn.execute("SELECT COUNT(*) FROM link_duplicate_alerts").fetchone()[0] == 0
+
+
+def test_cached_exact_url_wins_before_background_enriched_scan():
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "exact-precedence.sqlite")
+        event_conn = migrated_connection(path)
+        add_channel(event_conn, "C1")
+        add_channel(event_conn, "C2")
+        url = "https://example.com/cached"
+        add_link(
+            event_conn,
+            channel="C1",
+            message_ts="900.0",
+            thread_ts="900.0",
+            normalized_url=url,
+        )
+        complete_document(
+            event_conn,
+            url,
+            content="Cached article",
+            content_hash="cached",
+            embedding=[1, 0],
+        )
+
+        # The event path has committed enqueue_link but has not yet completed
+        # deterministic matching.
+        enqueue_link(
+            event_conn,
+            channel="C2",
+            message_timestamp="1000.0",
+            thread_ts="1000.0",
+            normalized_url=url,
+            original_url=url,
+            permalink="https://workspace.slack.com/current",
+            posted_at=1000.0,
+            now=1000.0,
+        )
+        background_conn = sqlite3.connect(path)
+        assert prepare_enriched_duplicate_alerts(background_conn, now=1000.1) == []
+        assert background_conn.execute(
+            """
+            SELECT deterministic_checked_at, duplicate_checked_at
+            FROM message_links WHERE channel = 'C2'
+            """
+        ).fetchone() == (None, None)
+
+        claim = prepare_exact_duplicate_alert(
+            event_conn,
+            channel="C2",
+            message_timestamp="1000.0",
+            thread_ts="1000.0",
+            permalink="https://workspace.slack.com/current",
+            posted_at=1000.0,
+            links=[ExternalLink(url, url)],
+            user_display_name="Alice",
+            now=1000.2,
+        )
+
+        assert claim is not None
+        assert claim.match_type == "exact_url"

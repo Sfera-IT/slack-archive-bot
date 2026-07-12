@@ -25,6 +25,7 @@ from link_enrichment import (
     enqueue_link,
     extract_document,
     fetch_html,
+    process_next_job,
     validate_fetch_url,
 )
 from utils import migrate_db
@@ -528,3 +529,69 @@ def test_worker_survives_transient_iteration_failure(monkeypatch):
     worker._run()
 
     assert calls == ["called", "called"]
+
+
+def test_matching_callback_failure_does_not_reclassify_completed_fetch():
+    with tempfile.TemporaryDirectory() as directory:
+        database_path = os.path.join(directory, "callback.sqlite")
+        conn = sqlite3.connect(database_path)
+        migrate_db(conn, conn.cursor())
+        enqueue_link(
+            conn,
+            channel="C1",
+            message_timestamp="100.1",
+            thread_ts="100.1",
+            normalized_url="https://example.com/story",
+            original_url="https://example.com/story",
+            permalink="https://slack/story",
+            posted_at=100.1,
+            now=100.1,
+        )
+        conn.close()
+
+        def fetcher(url):
+            return FetchResult(
+                requested_url=url,
+                final_url=url,
+                status_code=200,
+                content_type="text/html",
+                body=b"<title>Story</title><p>Enough metadata for a document.</p>",
+            )
+
+        with pytest.raises(RuntimeError, match="matching unavailable"):
+            process_next_job(
+                database_path,
+                lambda text: np.array([1.0]),
+                fetcher=fetcher,
+                on_document_ready=lambda url: (_ for _ in ()).throw(
+                    RuntimeError("matching unavailable")
+                ),
+            )
+
+        conn = sqlite3.connect(database_path)
+        assert conn.execute("SELECT status FROM link_enrichment_jobs").fetchone()[0] == "complete"
+        assert conn.execute("SELECT fetch_status FROM link_documents").fetchone()[0] == "complete"
+
+
+def test_idle_worker_retries_pending_duplicate_scan(monkeypatch):
+    scans = []
+    worker = LinkEnrichmentWorker(
+        "unused.sqlite",
+        lambda text: np.array([1.0]),
+        on_document_ready=lambda url: scans.append(url),
+        poll_interval=0,
+        error_backoff=0,
+    )
+
+    monkeypatch.setattr(link_enrichment_module, "process_next_job", lambda *args, **kwargs: False)
+
+    def scan(url):
+        scans.append(url)
+        if len(scans) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        worker._stop.set()
+
+    worker.on_document_ready = scan
+    worker._run()
+
+    assert scans == ["", ""]

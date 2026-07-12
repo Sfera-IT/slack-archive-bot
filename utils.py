@@ -553,6 +553,7 @@ def migrate_db(conn, cursor):
             original_url TEXT NOT NULL,
             permalink TEXT NOT NULL DEFAULT '',
             posted_at REAL NOT NULL,
+            deterministic_checked_at REAL,
             duplicate_checked_at REAL,
             PRIMARY KEY (channel, message_timestamp, normalized_url)
         )
@@ -564,6 +565,27 @@ def migrate_db(conn, cursor):
         ON message_links(normalized_url, posted_at)
         """
     )
+    added_deterministic_gate = False
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE message_links
+            ADD COLUMN deterministic_checked_at REAL
+            """
+        )
+        added_deterministic_gate = True
+    except sqlite3.OperationalError:
+        pass
+    if added_deterministic_gate:
+        # Rows written by the pre-gate implementation already completed the
+        # synchronous deterministic path before this migration existed.
+        cursor.execute(
+            """
+            UPDATE message_links
+            SET deterministic_checked_at = posted_at
+            WHERE deterministic_checked_at IS NULL
+            """
+        )
     cursor.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_message_links_thread
@@ -582,13 +604,14 @@ def migrate_db(conn, cursor):
         """
         INSERT OR IGNORE INTO message_links
         (channel, message_timestamp, thread_ts, normalized_url, original_url,
-         permalink, posted_at)
+         permalink, posted_at, deterministic_checked_at)
         SELECT p.channel,
                p.message_timestamp,
                COALESCE(m.thread_ts, p.message_timestamp),
                p.normalized_url,
                p.original_url,
                p.permalink,
+               COALESCE(CAST(m.timestamp AS REAL), CAST(strftime('%s', p.posted_date) AS REAL), 0),
                COALESCE(CAST(m.timestamp AS REAL), CAST(strftime('%s', p.posted_date) AS REAL), 0)
         FROM posted_links p
         LEFT JOIN messages m
@@ -630,8 +653,10 @@ def migrate_db(conn, cursor):
             current_channel TEXT NOT NULL,
             current_message_ts TEXT NOT NULL,
             current_thread_ts TEXT NOT NULL,
+            current_normalized_url TEXT NOT NULL,
             source_channel TEXT NOT NULL,
             source_message_ts TEXT NOT NULL,
+            source_normalized_url TEXT NOT NULL,
             source_permalink TEXT NOT NULL,
             match_type TEXT NOT NULL,
             score REAL,
@@ -646,10 +671,57 @@ def migrate_db(conn, cursor):
         )
         """
     )
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE link_duplicate_alerts
+            ADD COLUMN current_normalized_url TEXT NOT NULL DEFAULT ''
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE link_duplicate_alerts
+            ADD COLUMN source_normalized_url TEXT NOT NULL DEFAULT ''
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
     cursor.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_link_duplicate_alerts_source
         ON link_duplicate_alerts(source_channel, source_message_ts)
+        """
+    )
+
+    # Stato resumable del confronto semantico: un callback elabora solo un
+    # budget limitato e conserva cursore/miglior evidenza per l'iterazione dopo.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS link_match_scans (
+            current_channel TEXT NOT NULL,
+            current_message_ts TEXT NOT NULL,
+            current_normalized_url TEXT NOT NULL,
+            candidate_after_rowid INTEGER NOT NULL DEFAULT 0,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            claim_token TEXT NOT NULL DEFAULT '',
+            claimed_at REAL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (
+                current_channel,
+                current_message_ts,
+                current_normalized_url
+            )
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_match_scans_claim
+        ON link_match_scans(claim_token, claimed_at, created_at)
         """
     )
     conn.commit()

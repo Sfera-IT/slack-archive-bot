@@ -127,6 +127,11 @@ Material decisions:
   boundary: a post with unconfirmed cleanup retains `claimed` or `uncertain`
   suppression state and is never automatically reclaimed, because reposting
   would violate the at-most-one alert invariant.
+- Enriched eligibility is gated behind a separate deterministic completion
+  timestamp so background workers cannot outrun the exact-URL fast path.
+- Same-story scans use leased, durable rowid cursors and persisted best evidence;
+  each invocation examines at most ten current rows and 100 raw candidate rows,
+  then resumes without checking the message until the full 45-day space is done.
 
 ## Success Criteria
 
@@ -162,7 +167,7 @@ The goal is complete only when:
 
 - [x] Milestone 1: Durable safe link enrichment foundation
 - [x] Milestone 2: Deterministic duplicate processing for every link message
-- [ ] Milestone 3: Same-content and same-story matching, lifecycle, and operations
+- [x] Milestone 3: Same-content and same-story matching, lifecycle, and operations
 
 ### Checkpoint Protocol
 
@@ -331,7 +336,30 @@ UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests/te
 UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run python -m py_compile archivebot.py flask_app.py gunicorn_conf.py link_enrichment.py link_duplicates.py utils.py
 ```
 
-Status: Not started.
+Status: Complete on 2026-07-12. Milestone-start commit: `7aaa911`.
+
+- Outcome: different public-channel URLs are classified by identical extracted
+  content before conservative semantic similarity; matching traverses the full
+  45-day space through leased, durable, work-bounded scans. Deterministic gating
+  preserves exact precedence. Edits/deletions reconcile current and source
+  associations, jobs, scans, embeddings, and alerts while retaining document
+  cache. README documents operation, controls, security, and limitations.
+- Verification:
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv lock --check`
+    passed with 83 packages.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests/test_link_enrichment.py tests/test_link_duplicates.py tests/test_utils.py`
+    passed: 59 tests.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests`
+    passed: 103 tests.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run python -m py_compile archivebot.py flask_app.py gunicorn_conf.py link_enrichment.py link_duplicates.py utils.py`
+    passed.
+  - `git diff --check` passed.
+- Adversarial review: three repair rounds removed silent candidate truncation,
+  fenced stale edit/delete snapshots, separated deterministic/enriched
+  eligibility, and introduced resumable work-bounded scans; final result
+  `CLEAN`. Residual non-blocking performance risk: raw rowid paging may increase
+  alert latency on very large long-lived archives, but cannot monopolize one
+  callback or skip an eligible match.
 
 ## Final Verification
 

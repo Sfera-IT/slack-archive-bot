@@ -167,6 +167,7 @@ def test_migrate_db_creates_link_enrichment_tables_and_indexes():
         "message_links",
         "link_enrichment_jobs",
         "link_duplicate_alerts",
+        "link_match_scans",
     }.issubset(tables)
 
     job_columns = {
@@ -174,6 +175,18 @@ def test_migrate_db_creates_link_enrichment_tables_and_indexes():
         for row in cursor.execute("PRAGMA table_info(link_enrichment_jobs)").fetchall()
     }
     assert {"claim_token", "recoveries", "claimed_at", "attempts"}.issubset(job_columns)
+
+    message_link_columns = {
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(message_links)").fetchall()
+    }
+    assert "deterministic_checked_at" in message_link_columns
+
+    alert_columns = {
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(link_duplicate_alerts)").fetchall()
+    }
+    assert {"current_normalized_url", "source_normalized_url"}.issubset(alert_columns)
 
     indexes = {
         row[0]
@@ -189,6 +202,7 @@ def test_migrate_db_creates_link_enrichment_tables_and_indexes():
         "idx_message_links_unchecked",
         "idx_link_enrichment_jobs_claim",
         "idx_link_duplicate_alerts_source",
+        "idx_link_match_scans_claim",
     }.issubset(indexes)
 
 

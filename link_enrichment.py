@@ -851,6 +851,7 @@ def process_next_job(
     on_document_ready: Callable[[str], None] | None = None,
 ) -> bool:
     conn, _ = db_connect(database_path)
+    ready_url = None
     try:
         job = claim_next_job(conn)
         if job is None:
@@ -858,14 +859,27 @@ def process_next_job(
         try:
             document = extract_document(fetcher(job.requested_url))
             embedding = embed(document.embedding_text) if document.embedding_text else None
-            completed = complete_job(conn, job, document, embedding)
-            if completed and on_document_ready is not None:
-                on_document_ready(job.normalized_url)
+            cache_ttl = float(
+                os.getenv("LINK_FETCH_CACHE_TTL_SECONDS", str(7 * 24 * 60 * 60))
+            )
+            completed = complete_job(
+                conn,
+                job,
+                document,
+                embedding,
+                cache_ttl_seconds=cache_ttl,
+            )
+            if completed:
+                ready_url = job.normalized_url
         except EnrichmentError as exc:
             fail_job(conn, job, exc)
         except Exception as exc:
             logger.exception("Unexpected link enrichment failure for %s", job.normalized_url)
             fail_job(conn, job, EnrichmentError("internal_error", str(exc)))
+        if ready_url is not None and on_document_ready is not None:
+            # Matching failure must not rewrite a completed fetch as failed.
+            # The worker loop will retry durable unchecked message_links.
+            on_document_ready(ready_url)
         return True
     finally:
         conn.close()
@@ -923,5 +937,12 @@ class LinkEnrichmentWorker:
                 self._stop.wait(self.error_backoff)
                 continue
             if not processed:
+                if self.on_document_ready is not None:
+                    try:
+                        self.on_document_ready("")
+                    except Exception:
+                        logger.exception("Pending link duplicate scan failed; retrying")
+                        self._stop.wait(self.error_backoff)
+                        continue
                 self._stop.wait(self.poll_interval)
         logger.info("Link enrichment worker stopped")
