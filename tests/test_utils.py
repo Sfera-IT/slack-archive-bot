@@ -148,3 +148,101 @@ def test_migrate_db_creates_hot_path_indexes():
         "idx_members_channel_user",
         "idx_posted_links_normalized_posted_date",
     }.issubset(indexes)
+
+
+def test_migrate_db_creates_link_enrichment_tables_and_indexes():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+
+    migrate_db(conn, cursor)
+
+    tables = {
+        row[0]
+        for row in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    assert {
+        "link_documents",
+        "message_links",
+        "link_enrichment_jobs",
+        "link_duplicate_alerts",
+        "link_match_scans",
+    }.issubset(tables)
+
+    job_columns = {
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(link_enrichment_jobs)").fetchall()
+    }
+    assert {"claim_token", "recoveries", "claimed_at", "attempts"}.issubset(job_columns)
+
+    message_link_columns = {
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(message_links)").fetchall()
+    }
+    assert "deterministic_checked_at" in message_link_columns
+
+    alert_columns = {
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(link_duplicate_alerts)").fetchall()
+    }
+    assert {"current_normalized_url", "source_normalized_url"}.issubset(alert_columns)
+
+    indexes = {
+        row[0]
+        for row in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        ).fetchall()
+    }
+    assert {
+        "idx_link_documents_content_hash",
+        "idx_link_documents_status_expiry",
+        "idx_message_links_url_posted",
+        "idx_message_links_thread",
+        "idx_message_links_unchecked",
+        "idx_link_enrichment_jobs_claim",
+        "idx_link_duplicate_alerts_source",
+        "idx_link_match_scans_claim",
+    }.issubset(indexes)
+
+
+def test_migrate_db_backfills_legacy_posted_links():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    migrate_db(conn, cursor)
+    cursor.execute(
+        "INSERT INTO channels(name, id, is_private) VALUES ('general', 'C1', 0)"
+    )
+    cursor.execute(
+        """
+        INSERT INTO messages
+        (message, user, channel, timestamp, permalink, thread_ts, embeddings)
+        VALUES ('story', 'U1', 'C1', '900.1', 'https://slack/message', '800.1', NULL)
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO posted_links
+        (normalized_url, original_url, message_timestamp, channel, permalink, posted_date)
+        VALUES ('https://example.com/story', 'https://example.com/story?utm=x',
+                '900.1', 'C1', 'https://slack/message', '1970-01-01T00:15:00')
+        """
+    )
+    conn.commit()
+
+    migrate_db(conn, cursor)
+
+    row = cursor.execute(
+        """
+        SELECT channel, message_timestamp, thread_ts, normalized_url, permalink, posted_at
+        FROM message_links
+        """
+    ).fetchone()
+    assert row == (
+        "C1",
+        "900.1",
+        "800.1",
+        "https://example.com/story",
+        "https://slack/message",
+        900.1,
+    )

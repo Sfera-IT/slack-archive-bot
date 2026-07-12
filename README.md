@@ -93,6 +93,54 @@ is invited to.  To add the bot to your channels:
 
 If @ArchiveBot is the name you gave your bot user.
 
+## Duplicate link and story detection
+
+Every external HTTP(S) link shared in a channel root or thread reply is checked
+against the preceding 45 days. Slack links and messages without external links
+are ignored.
+
+- The same normalized URL produces an immediate *same link* alert.
+- A different URL with the same extracted article text produces a *same content*
+  alert after background enrichment.
+- A different URL whose extracted content exceeds the configured similarity
+  threshold produces a clearly labelled *potentially the same story* alert.
+
+Alerts cite the earlier Slack permalink and appear in the new message's thread.
+A repost inside the same Slack thread is silent. Cross-channel same-content and
+same-story comparisons run only between public channels; private-channel content
+is never surfaced elsewhere. If Slack delivery is ambiguous, the bot suppresses
+automatic retry rather than risk posting the warning twice.
+
+Link enrichment is asynchronous and durable in SQLite. Development mode starts
+one daemon worker; Gunicorn starts one atomically coordinated worker per process.
+Same-story comparison also uses leased SQLite scan state: each worker iteration
+examines a bounded batch and resumes later without marking a link checked until
+its complete 45-day candidate space has been evaluated.
+The fetcher accepts public HTML only, pins connections to validated public IPs,
+revalidates redirects, and applies one DNS-through-body deadline plus response
+size and connection limits. It does not execute JavaScript, authenticate to
+sites, bypass paywalls, or extract PDFs/media. Metadata-only pages require a
+higher similarity score; failed or unsupported pages retain exact-link checking
+but cannot produce a semantic match.
+
+Configuration:
+
+- `LINK_ENRICHMENT_ENABLED` — enable the worker; default `true`.
+- `LINK_TOPIC_SIMILARITY_THRESHOLD` — semantic threshold from `0` to `1`;
+  default `0.92`. Metadata-only comparisons require at least `0.97`.
+- `LINK_FETCH_TOTAL_TIMEOUT_SECONDS` — total DNS-through-body deadline; default
+  `15`.
+- `LINK_FETCH_CONNECT_TIMEOUT_SECONDS`, `LINK_FETCH_READ_TIMEOUT_SECONDS`, and
+  `LINK_FETCH_POOL_TIMEOUT_SECONDS` — per-operation ceilings inside the total
+  deadline; defaults `3`, `5`, and `2`.
+- `LINK_FETCH_MAX_BYTES` — decompressed HTML cap; default `3145728`.
+- `LINK_FETCH_MAX_REDIRECTS` — redirect cap; default `5`.
+- `LINK_FETCH_MAX_CONNECTIONS` — per-worker connection cap; default `4`.
+- `LINK_FETCH_CACHE_TTL_SECONDS` — successful document cache lifetime; default
+  `604800`.
+- `LINK_ENRICHMENT_POLL_SECONDS` and `LINK_ENRICHMENT_ERROR_BACKOFF_SECONDS` —
+  idle polling and transient-error backoff; defaults `2` and `5`.
+
 ## Searching
 
 To search the archive, direct message (DM) @ArchiveBot with the search query.

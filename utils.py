@@ -504,6 +504,228 @@ def migrate_db(conn, cursor):
         # Se la migrazione fallisce, continua (potrebbe essere già migrata o non esistere)
         pass
 
+    # Cache condivisa dei documenti esterni usati per il confronto dei link.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS link_documents (
+            normalized_url TEXT PRIMARY KEY,
+            requested_url TEXT NOT NULL,
+            final_url TEXT,
+            canonical_url TEXT,
+            title TEXT,
+            description TEXT,
+            content TEXT,
+            content_hash TEXT,
+            embedding BLOB,
+            extraction_quality TEXT NOT NULL DEFAULT 'pending',
+            fetch_status TEXT NOT NULL DEFAULT 'pending',
+            http_status INTEGER,
+            fetched_at REAL,
+            expires_at REAL,
+            last_error TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_documents_content_hash
+        ON link_documents(content_hash)
+        WHERE content_hash IS NOT NULL
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_documents_status_expiry
+        ON link_documents(fetch_status, expires_at)
+        """
+    )
+
+    # Associazione tra un messaggio Slack e ogni link esterno che contiene.
+    # Lo stato del documento resta separato per poter riusare la cache senza
+    # perdere il ciclo di vita del messaggio che ha condiviso il link.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_links (
+            channel TEXT NOT NULL,
+            message_timestamp TEXT NOT NULL,
+            thread_ts TEXT NOT NULL,
+            normalized_url TEXT NOT NULL,
+            original_url TEXT NOT NULL,
+            permalink TEXT NOT NULL DEFAULT '',
+            posted_at REAL NOT NULL,
+            deterministic_checked_at REAL,
+            duplicate_checked_at REAL,
+            PRIMARY KEY (channel, message_timestamp, normalized_url)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_message_links_url_posted
+        ON message_links(normalized_url, posted_at)
+        """
+    )
+    added_deterministic_gate = False
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE message_links
+            ADD COLUMN deterministic_checked_at REAL
+            """
+        )
+        added_deterministic_gate = True
+    except sqlite3.OperationalError:
+        pass
+    if added_deterministic_gate:
+        # Rows written by the pre-gate implementation already completed the
+        # synchronous deterministic path before this migration existed.
+        cursor.execute(
+            """
+            UPDATE message_links
+            SET deterministic_checked_at = posted_at
+            WHERE deterministic_checked_at IS NULL
+            """
+        )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_message_links_thread
+        ON message_links(channel, thread_ts)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_message_links_unchecked
+        ON message_links(duplicate_checked_at, posted_at)
+        """
+    )
+    # Importa le righe legacy senza cambiare o eliminare posted_links. I
+    # duplicati storici restano così candidati del nuovo percorso.
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO message_links
+        (channel, message_timestamp, thread_ts, normalized_url, original_url,
+         permalink, posted_at, deterministic_checked_at)
+        SELECT p.channel,
+               p.message_timestamp,
+               COALESCE(m.thread_ts, p.message_timestamp),
+               p.normalized_url,
+               p.original_url,
+               p.permalink,
+               COALESCE(CAST(m.timestamp AS REAL), CAST(strftime('%s', p.posted_date) AS REAL), 0),
+               COALESCE(CAST(m.timestamp AS REAL), CAST(strftime('%s', p.posted_date) AS REAL), 0)
+        FROM posted_links p
+        LEFT JOIN messages m
+          ON m.channel = p.channel AND m.timestamp = p.message_timestamp
+        """
+    )
+
+    # Una coda durevole per URL (non per messaggio): più messaggi che puntano
+    # allo stesso documento condividono un solo fetch. INSERT OR IGNORE e il
+    # claim atomico rendono sicuri retry Slack e worker Gunicorn multipli.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS link_enrichment_jobs (
+            normalized_url TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            recoveries INTEGER NOT NULL DEFAULT 0,
+            available_at REAL NOT NULL,
+            claimed_at REAL,
+            claim_token TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            last_error TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_enrichment_jobs_claim
+        ON link_enrichment_jobs(status, available_at, created_at)
+        """
+    )
+
+    # Un solo alert di duplicato per messaggio nuovo. Il claim token evita che
+    # eventi Slack concorrenti pubblichino lo stesso avviso due volte.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS link_duplicate_alerts (
+            current_channel TEXT NOT NULL,
+            current_message_ts TEXT NOT NULL,
+            current_thread_ts TEXT NOT NULL,
+            current_normalized_url TEXT NOT NULL,
+            source_channel TEXT NOT NULL,
+            source_message_ts TEXT NOT NULL,
+            source_normalized_url TEXT NOT NULL,
+            source_permalink TEXT NOT NULL,
+            match_type TEXT NOT NULL,
+            score REAL,
+            alert_message_ts TEXT NOT NULL DEFAULT '',
+            alert_text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'claimed',
+            claim_token TEXT NOT NULL,
+            claimed_at REAL NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (current_channel, current_message_ts)
+        )
+        """
+    )
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE link_duplicate_alerts
+            ADD COLUMN current_normalized_url TEXT NOT NULL DEFAULT ''
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE link_duplicate_alerts
+            ADD COLUMN source_normalized_url TEXT NOT NULL DEFAULT ''
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_duplicate_alerts_source
+        ON link_duplicate_alerts(source_channel, source_message_ts)
+        """
+    )
+
+    # Stato resumable del confronto semantico: un callback elabora solo un
+    # budget limitato e conserva cursore/miglior evidenza per l'iterazione dopo.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS link_match_scans (
+            current_channel TEXT NOT NULL,
+            current_message_ts TEXT NOT NULL,
+            current_normalized_url TEXT NOT NULL,
+            candidate_after_rowid INTEGER NOT NULL DEFAULT 0,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            claim_token TEXT NOT NULL DEFAULT '',
+            claimed_at REAL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (
+                current_channel,
+                current_message_ts,
+                current_normalized_url
+            )
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_match_scans_claim
+        ON link_match_scans(claim_token, claimed_at, created_at)
+        """
+    )
+    conn.commit()
+
 
 
 def claim_xcancel_alert(cursor, parent_ts, channel, alert_text):
