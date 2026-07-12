@@ -5,6 +5,7 @@ import os
 import traceback
 from sentence_transformers import SentenceTransformer
 import re
+import threading
 from datetime import datetime, timedelta
 
 from slack_bolt import App
@@ -14,6 +15,7 @@ from ai_context import format_messages_for_prompt, get_ai_context_scope, is_enga
 from utils import claim_xcancel_alert, db_connect, finalize_xcancel_alert, migrate_db
 from url_cleaner import UrlCleaner
 from xcancel import build_xcancel_response_text
+from link_enrichment import LinkEnrichmentWorker
 from sferait_context import (
     SFERAIT_SYSTEM_PROMPT,
     get_recent_messages,
@@ -35,15 +37,19 @@ ADMIN_USERS = [
 
 # Lazy-loaded SentenceTransformer model (loaded once on first use)
 _sentence_transformer_model = None
+_sentence_transformer_lock = threading.Lock()
+_link_enrichment_worker = None
 
 
 def _get_sentence_transformer():
     """Get or initialize the SentenceTransformer model (lazy loading)."""
     global _sentence_transformer_model
     if _sentence_transformer_model is None:
-        logger.info("Loading SentenceTransformer model (one-time initialization)...")
-        _sentence_transformer_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
-        logger.info("SentenceTransformer model loaded successfully")
+        with _sentence_transformer_lock:
+            if _sentence_transformer_model is None:
+                logger.info("Loading SentenceTransformer model (one-time initialization)...")
+                _sentence_transformer_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
+                logger.info("SentenceTransformer model loaded successfully")
     return _sentence_transformer_model
 
 parser = argparse.ArgumentParser()
@@ -2565,10 +2571,31 @@ def init():
     
     # Log stato iniziale della lista clown
     logger.info(f"[CLOWN] Bot initialized. Clown list is empty (will be populated via DM commands)")
+
+
+def start_link_enrichment_worker():
+    """Start one daemon worker in the current development/Gunicorn process."""
+    global _link_enrichment_worker
+    enabled = os.getenv("LINK_ENRICHMENT_ENABLED", "true").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        logger.info("Link enrichment worker disabled")
+        return None
+    if _link_enrichment_worker is None:
+        _link_enrichment_worker = LinkEnrichmentWorker(database_path, create_embeddings)
+    _link_enrichment_worker.start()
+    return _link_enrichment_worker
+
+
+def stop_link_enrichment_worker():
+    global _link_enrichment_worker
+    if _link_enrichment_worker is not None:
+        _link_enrichment_worker.stop()
+        _link_enrichment_worker = None
         
         
 def main():
     init()
+    start_link_enrichment_worker()
 
     # Start the development server
     app.start(port=port)
@@ -2578,4 +2605,9 @@ if __name__ == "__main__":
     main()
 
 # Make sure this function is accessible when imported
-__all__ = ['update_users', 'app']
+__all__ = [
+    'update_users',
+    'app',
+    'start_link_enrichment_worker',
+    'stop_link_enrichment_worker',
+]

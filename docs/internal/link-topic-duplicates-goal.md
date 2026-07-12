@@ -111,6 +111,18 @@ Material decisions:
   no LLM verifier or new external AI call is required for the initial feature.
 - Production defaults must be configurable by environment variables and safe
   when enrichment is temporarily unavailable.
+- `timedelta==2020.12.3` was removed from project dependencies during Milestone
+  1: refreshed `uv lock` could no longer resolve that third-party package, and
+  repository code imports only the standard-library `datetime.timedelta`.
+- `charset-normalizer` was advanced from `3.3.2` to `3.4.4`, the minimum
+  compatible pinned line available for Trafilatura 2.1's `>=3.4.0` requirement.
+- Milestone 1 review required actual-IP connection pinning (with original Host
+  and TLS SNI), a total wall-clock fetch deadline, and token-owned job leases
+  with bounded abandoned-claim recovery. These are security/concurrency
+  invariants rather than deployment assumptions.
+- The same fetch deadline covers DNS through bounded dnspython A/AAAA lookups;
+  OS `getaddrinfo` was rejected for production because it cannot be cancelled
+  reliably within the worker's total budget.
 
 ## Success Criteria
 
@@ -144,7 +156,7 @@ The goal is complete only when:
 
 ## Milestones
 
-- [ ] Milestone 1: Durable safe link enrichment foundation
+- [x] Milestone 1: Durable safe link enrichment foundation
 - [ ] Milestone 2: Deterministic duplicate processing for every link message
 - [ ] Milestone 3: Same-content and same-story matching, lifecycle, and operations
 
@@ -203,7 +215,27 @@ UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv lock --check
 UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests/test_link_enrichment.py tests/test_utils.py
 ```
 
-Status: Not started. Milestone-start commit: to be recorded after the goal commit.
+Status: Complete on 2026-07-12. Milestone-start commit: `31bff42`.
+
+- Outcome: added additive document/message-link/job state, idempotent enqueue,
+  token-fenced atomic claims, bounded stale recovery, pinned-IP safe HTTP fetch,
+  one DNS-through-body deadline, bounded HTML extraction/cache state, and daemon
+  worker lifecycle hooks for development and Gunicorn.
+- Verification:
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv lock --check`
+    passed with 83 packages.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests/test_link_enrichment.py tests/test_utils.py`
+    passed: 29 tests.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests`
+    passed: 73 tests.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run python -m py_compile archivebot.py gunicorn_conf.py link_enrichment.py utils.py`
+    passed.
+  - `git diff --check` passed.
+- Adversarial review: three repair rounds resolved DNS rebinding, true total
+  deadlines including DNS, token-owned stale claims, bounded recovery, and
+  worker-loop survival; final result `CLEAN`. Residual non-blocking risk: the
+  deadline transport relies on pinned HTTPX/httpcore internals and its focused
+  tests must accompany future dependency upgrades.
 
 ## Milestone 2: Deterministic Duplicate Processing For Every Link Message
 

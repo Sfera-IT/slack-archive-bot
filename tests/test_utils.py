@@ -148,3 +148,39 @@ def test_migrate_db_creates_hot_path_indexes():
         "idx_members_channel_user",
         "idx_posted_links_normalized_posted_date",
     }.issubset(indexes)
+
+
+def test_migrate_db_creates_link_enrichment_tables_and_indexes():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+
+    migrate_db(conn, cursor)
+
+    tables = {
+        row[0]
+        for row in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    assert {"link_documents", "message_links", "link_enrichment_jobs"}.issubset(tables)
+
+    job_columns = {
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(link_enrichment_jobs)").fetchall()
+    }
+    assert {"claim_token", "recoveries", "claimed_at", "attempts"}.issubset(job_columns)
+
+    indexes = {
+        row[0]
+        for row in cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        ).fetchall()
+    }
+    assert {
+        "idx_link_documents_content_hash",
+        "idx_link_documents_status_expiry",
+        "idx_message_links_url_posted",
+        "idx_message_links_thread",
+        "idx_message_links_unchecked",
+        "idx_link_enrichment_jobs_claim",
+    }.issubset(indexes)

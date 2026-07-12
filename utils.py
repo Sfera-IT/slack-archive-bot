@@ -504,6 +504,106 @@ def migrate_db(conn, cursor):
         # Se la migrazione fallisce, continua (potrebbe essere già migrata o non esistere)
         pass
 
+    # Cache condivisa dei documenti esterni usati per il confronto dei link.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS link_documents (
+            normalized_url TEXT PRIMARY KEY,
+            requested_url TEXT NOT NULL,
+            final_url TEXT,
+            canonical_url TEXT,
+            title TEXT,
+            description TEXT,
+            content TEXT,
+            content_hash TEXT,
+            embedding BLOB,
+            extraction_quality TEXT NOT NULL DEFAULT 'pending',
+            fetch_status TEXT NOT NULL DEFAULT 'pending',
+            http_status INTEGER,
+            fetched_at REAL,
+            expires_at REAL,
+            last_error TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_documents_content_hash
+        ON link_documents(content_hash)
+        WHERE content_hash IS NOT NULL
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_documents_status_expiry
+        ON link_documents(fetch_status, expires_at)
+        """
+    )
+
+    # Associazione tra un messaggio Slack e ogni link esterno che contiene.
+    # Lo stato del documento resta separato per poter riusare la cache senza
+    # perdere il ciclo di vita del messaggio che ha condiviso il link.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_links (
+            channel TEXT NOT NULL,
+            message_timestamp TEXT NOT NULL,
+            thread_ts TEXT NOT NULL,
+            normalized_url TEXT NOT NULL,
+            original_url TEXT NOT NULL,
+            permalink TEXT NOT NULL DEFAULT '',
+            posted_at REAL NOT NULL,
+            duplicate_checked_at REAL,
+            PRIMARY KEY (channel, message_timestamp, normalized_url)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_message_links_url_posted
+        ON message_links(normalized_url, posted_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_message_links_thread
+        ON message_links(channel, thread_ts)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_message_links_unchecked
+        ON message_links(duplicate_checked_at, posted_at)
+        """
+    )
+
+    # Una coda durevole per URL (non per messaggio): più messaggi che puntano
+    # allo stesso documento condividono un solo fetch. INSERT OR IGNORE e il
+    # claim atomico rendono sicuri retry Slack e worker Gunicorn multipli.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS link_enrichment_jobs (
+            normalized_url TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            recoveries INTEGER NOT NULL DEFAULT 0,
+            available_at REAL NOT NULL,
+            claimed_at REAL,
+            claim_token TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            last_error TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_enrichment_jobs_claim
+        ON link_enrichment_jobs(status, available_at, created_at)
+        """
+    )
+    conn.commit()
+
 
 
 def claim_xcancel_alert(cursor, parent_ts, channel, alert_text):
