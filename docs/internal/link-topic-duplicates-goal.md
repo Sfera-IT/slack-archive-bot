@@ -377,6 +377,26 @@ Inspect all failures and repair in-scope defects rather than weakening tests. An
 unrelated pre-existing failure is acceptable only with the command, output, and
 evidence that this branch did not cause it.
 
+Status: Complete on 2026-07-12.
+
+- Final verification passed:
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv lock --check`
+    resolved 83 packages.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv sync --frozen`
+    passed.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests`
+    passed: 111 tests.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run python -m py_compile archivebot.py flask_app.py gunicorn_conf.py link_enrichment.py link_duplicates.py utils.py`
+    passed.
+  - `git diff --check origin/master...HEAD` passed.
+- Fresh independent final audit: one repair round routed link processing before
+  all mention/engage/stop early returns and restricted definitive content-hash
+  equality to two full-text extractions. Re-audit result: `CLEAN`.
+- All target-state and success criteria are satisfied. Remaining risks are
+  non-blocking and documented: fail-closed ambiguous-delivery suppression,
+  scan latency while prior enrichment is pending, and pinned transport coupling
+  to HTTPX/httpcore internals.
+
 ## Resume Protocol
 
 On resume, read this prompt, `AGENTS.md`, `git status`, milestone status notes,

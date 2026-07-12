@@ -98,6 +98,21 @@ def extract_external_links(
     return links
 
 
+def route_link_message_event(
+    message: dict,
+    normalize: Callable[[str], str],
+    process: Callable[[list[ExternalLink]], None],
+) -> bool:
+    """Route every channel root/reply with external links before early returns."""
+    if message.get("channel_type") == "im" or not message.get("channel"):
+        return False
+    links = extract_external_links(message.get("text", ""), normalize)
+    if not links:
+        return False
+    process(links)
+    return True
+
+
 def find_exact_duplicate(
     conn: sqlite3.Connection,
     *,
@@ -797,7 +812,14 @@ def prepare_enriched_duplicate_alerts(
                 source_permalink=source_permalink,
                 source_posted_at=source_posted_at,
             )
-            if current_content and source_content and current_hash and current_hash == source_hash:
+            if (
+                current_quality == "full_text"
+                and source_quality == "full_text"
+                and current_content
+                and source_content
+                and current_hash
+                and current_hash == source_hash
+            ):
                 if content_match is None or match.source_posted_at > content_match.source_posted_at:
                     content_match = match
                 continue

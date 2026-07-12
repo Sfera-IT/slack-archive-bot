@@ -24,6 +24,7 @@ from link_duplicates import (
     prepare_exact_duplicate_alert,
     reconcile_edited_message_links,
     release_duplicate_alert,
+    route_link_message_event,
 )
 import link_duplicates as link_duplicates_module
 from link_enrichment import enqueue_link
@@ -131,6 +132,47 @@ def test_extract_external_links_is_link_only_unique_and_excludes_slack():
 
     assert links == [ExternalLink("https://example.com/story?utm=x", "https://example.com/story")]
     assert extract_external_links("Only prose about a migration", lambda url: url) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "thread_ts"),
+    [
+        ("<@UBOT> review https://example.com/root", None),
+        ("<@UBOT> /engage https://example.com/reply", "900.1"),
+        ("<@UBOT> stop https://example.com/reply", "900.1"),
+    ],
+)
+def test_link_routing_precedes_mention_and_engagement_early_returns(text, thread_ts):
+    processed = []
+    message = {"channel": "C1", "channel_type": "channel", "text": text}
+    if thread_ts:
+        message["thread_ts"] = thread_ts
+
+    routed = route_link_message_event(
+        message,
+        lambda url: url,
+        lambda links: processed.extend(links),
+    )
+
+    assert routed is True
+    assert [link.normalized_url for link in processed] == [
+        "https://example.com/root" if thread_ts is None else "https://example.com/reply"
+    ]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"channel": "D1", "channel_type": "im", "text": "https://example.com/private"},
+        {"channel": "C1", "channel_type": "channel", "text": "<@UBOT> /engage"},
+        {"channel": "C1", "channel_type": "channel", "text": "<@UBOT> stop"},
+    ],
+)
+def test_link_routing_ignores_dms_and_link_free_control_messages(message):
+    processed = []
+
+    assert route_link_message_event(message, lambda url: url, processed.extend) is False
+    assert processed == []
 
 
 def test_exact_duplicate_covers_root_messages_across_public_channels():
@@ -435,6 +477,94 @@ def test_identical_extracted_content_precedes_semantic_similarity():
     assert claims[0].match_type == "same_content"
     assert claims[0].score == 1.0
     assert "URL diverso" in claims[0].text
+
+
+def test_identical_metadata_hash_is_not_definitive_content_match():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    add_link(
+        conn,
+        channel="C1",
+        message_ts="900.1",
+        thread_ts="900.1",
+        normalized_url="https://source.example/metadata",
+    )
+    add_link(
+        conn,
+        channel="C2",
+        message_ts="1000.2",
+        thread_ts="1000.2",
+        normalized_url="https://mirror.example/metadata",
+    )
+    complete_document(
+        conn,
+        "https://source.example/metadata",
+        content="Shared short title",
+        content_hash="same-short-hash",
+        embedding=[1.0, 0.0],
+        quality="metadata_only",
+    )
+    complete_document(
+        conn,
+        "https://mirror.example/metadata",
+        content="Shared short title",
+        content_hash="same-short-hash",
+        embedding=[0.0, 1.0],
+        quality="metadata_only",
+    )
+
+    assert prepare_enriched_duplicate_alerts(
+        conn,
+        similarity_threshold=0.99,
+        now=1100.0,
+    ) == []
+
+
+def test_identical_metadata_hash_can_only_produce_semantic_story_match():
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    add_link(
+        conn,
+        channel="C1",
+        message_ts="900.1",
+        thread_ts="900.1",
+        normalized_url="https://source.example/metadata",
+    )
+    add_link(
+        conn,
+        channel="C2",
+        message_ts="1000.2",
+        thread_ts="1000.2",
+        normalized_url="https://mirror.example/metadata",
+    )
+    complete_document(
+        conn,
+        "https://source.example/metadata",
+        content="Shared short title",
+        content_hash="same-short-hash",
+        embedding=[1.0, 0.0],
+        quality="metadata_only",
+    )
+    complete_document(
+        conn,
+        "https://mirror.example/metadata",
+        content="Shared short title",
+        content_hash="same-short-hash",
+        embedding=[1.0, 0.0],
+        quality="metadata_only",
+    )
+
+    claims = prepare_enriched_duplicate_alerts(
+        conn,
+        similarity_threshold=0.90,
+        now=1100.0,
+    )
+
+    assert len(claims) == 1
+    assert claims[0].match_type == "same_story"
+    assert claims[0].score == pytest.approx(1.0)
 
 
 def test_high_similarity_different_urls_create_potential_story_claim():

@@ -24,6 +24,7 @@ from link_duplicates import (
     prepare_exact_duplicate_alert,
     prepare_enriched_duplicate_alerts,
     reconcile_edited_message_links,
+    route_link_message_event,
 )
 from sferait_context import (
     SFERAIT_SYSTEM_PROMPT,
@@ -783,9 +784,9 @@ def sync_xcancel_alternatives_for_message(message, say):
     post_xcancel_alternatives(message, say)
 
 
-def check_and_store_links(message, permalink_dict, say):
+def check_and_store_links(message, permalink_dict, say, *, links=None):
     """Record every external link and post at most one deterministic alert."""
-    links = extract_external_links(message.get("text", ""), normalize_url)
+    links = links or extract_external_links(message.get("text", ""), normalize_url)
     if not links:
         return
 
@@ -1019,6 +1020,19 @@ def handle_message(message, say):
         logger.debug("[CLOWN] Skipping message: no text or from USLACKBOT")
         return
 
+    # Route links before engage/mention/stop early returns. app_mention and
+    # message events can overlap; message-link and alert claims are idempotent.
+    route_link_message_event(
+        message,
+        normalize_url,
+        lambda links: check_and_store_links(
+            message,
+            {"permalink": ""},
+            say,
+            links=links,
+        ),
+    )
+
     # Controlla se il bot è menzionato nel messaggio
     bot_user_id = app._bot_user_id
     text = message.get("text", "")
@@ -1092,12 +1106,10 @@ def handle_message(message, say):
         conn.commit()
         conn.close()
 
-        # Check for duplicate links and respond if found (using original message data)
-        # Create a copy of the message with original data for link checking
+        # Keep original message data for link-adjacent behaviors.
         original_message = message.copy()
         original_message["text"] = original_text
         original_message["user"] = original_user
-        check_and_store_links(original_message, permalink, say)
         
         # Post xcancel.com alternatives for any x.com links
         post_xcancel_alternatives(original_message, say)
@@ -2375,6 +2387,16 @@ def maybe_auto_engage_trash(message, say):
 def handle_app_mention_event(event, say):
     """Handler per l'evento app_mention da Slack."""
     logger.info(f"[AI] Received app_mention event: {event}")
+    route_link_message_event(
+        event,
+        normalize_url,
+        lambda links: check_and_store_links(
+            event,
+            {"permalink": ""},
+            say,
+            links=links,
+        ),
+    )
     if _maybe_handle_engage_command(event, say):
         return
     handle_app_mention(event, say)
