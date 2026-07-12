@@ -16,6 +16,11 @@ from utils import claim_xcancel_alert, db_connect, finalize_xcancel_alert, migra
 from url_cleaner import UrlCleaner
 from xcancel import build_xcancel_response_text
 from link_enrichment import LinkEnrichmentWorker
+from link_duplicates import (
+    deliver_duplicate_alert,
+    extract_external_links,
+    prepare_exact_duplicate_alert,
+)
 from sferait_context import (
     SFERAIT_SYSTEM_PROMPT,
     get_recent_messages,
@@ -515,20 +520,6 @@ def get_permalink_and_save(res):
     return res
 
 
-def extract_urls(text):
-    """Estrae tutti gli URL HTTP/HTTPS da un testo."""
-    # Pattern per rilevare URL http/https
-    url_pattern = r'https?://[^\s<>":{}|\\^`\[\]]+'
-    urls = re.findall(url_pattern, text, flags=re.IGNORECASE)
-    # Rimuovi eventuali caratteri di punteggiatura alla fine dell'URL
-    cleaned_urls = []
-    for url in urls:
-        # Rimuovi caratteri di punteggiatura comuni alla fine
-        url = url.rstrip('.,;:!?')
-        cleaned_urls.append(url)
-    return cleaned_urls
-
-
 def normalize_url(url):
     """Normalizza un URL applicando le regole ClearURLs (provider-aware)."""
     try:
@@ -789,175 +780,72 @@ def sync_xcancel_alternatives_for_message(message, say):
 
 
 def check_and_store_links(message, permalink_dict, say):
-    """Controlla se ci sono link nel messaggio e verifica duplicati.
-    Il controllo viene fatto solo sui messaggi principali, non sulle risposte nei thread."""
-    # Salta il controllo se è una risposta in un thread (ha thread_ts diverso dal timestamp)
-    if "thread_ts" in message and message.get("thread_ts") != message.get("ts"):
-        logger.debug("Skipping link check for thread reply (not a main message)")
+    """Record every external link and post at most one deterministic alert."""
+    links = extract_external_links(message.get("text", ""), normalize_url)
+    if not links:
         return
-    
-    text = message.get("text", "")
-    if not text:
+
+    channel = message.get("channel")
+    message_ts = message.get("ts")
+    if not channel or not message_ts:
+        logger.warning("Link-bearing message missing channel or timestamp")
         return
-    
-    urls = extract_urls(text)
-    if not urls:
-        return
-    
-    conn, cursor = db_connect(database_path)
-    
-    try:
-        # Ottieni il permalink del messaggio corrente
-        current_permalink = permalink_dict.get("permalink", "")
-        # Se non c'è permalink, prova a ottenerlo
-        if not current_permalink and message.get("ts"):
-            try:
-                current_permalink = app.client.chat_getPermalink(
-                    channel=message["channel"], 
-                    message_ts=message["ts"]
-                )["permalink"]
-            except Exception as e:
-                logger.warning(f"Could not get permalink for message: {e}")
-        
-        # Ottieni il nome utente per la risposta
-        user_name = message.get("user", "")
+
+    current_permalink = permalink_dict.get("permalink", "")
+    if not current_permalink:
         try:
-            user_info = app.client.users_info(user=user_name)
-            user_display_name = user_info["user"]["profile"].get("display_name") or user_info["user"]["profile"].get("real_name", "utente")
-        except:
-            user_display_name = "utente"
-        
-        for original_url in urls:
-            # Escludi i link di Slack dall'analisi
-            if original_url.startswith("https://sferait-ws.slack.com/") or original_url.startswith("http://sferait-ws.slack.com/"):
-                logger.debug(f"Skipping Slack link from duplicate check: {original_url}")
-                continue
-            
-            normalized_url = normalize_url(original_url)
-            
-            # Controlla se esiste già un link normalizzato simile negli ultimi 45 giorni
-            # Escludi il messaggio corrente dalla ricerca per evitare di trovare il link appena salvato
-            forty_five_days_ago = datetime.now() - timedelta(days=45)
-            cursor.execute(
-                """
-                SELECT normalized_url, permalink, posted_date, duplicate_notified, message_timestamp
-                FROM posted_links 
-                WHERE normalized_url = ? 
-                AND posted_date >= ?
-                AND message_timestamp != ?
-                ORDER BY posted_date DESC
-                LIMIT 1
-                """,
-                (normalized_url, forty_five_days_ago.isoformat(), message.get("ts", ""))
+            current_permalink = app.client.chat_getPermalink(
+                channel=channel,
+                message_ts=message_ts,
+            )["permalink"]
+        except Exception as e:
+            logger.warning(f"Could not get permalink for message: {e}")
+
+    user_display_name = "utente"
+    try:
+        profile = app.client.users_info(user=message.get("user", ""))["user"]["profile"]
+        user_display_name = profile.get("display_name") or profile.get("real_name") or "utente"
+    except Exception:
+        logger.debug("Could not resolve display name for duplicate alert", exc_info=True)
+
+    conn, _ = db_connect(database_path)
+    claim = None
+    try:
+        claim = prepare_exact_duplicate_alert(
+            conn,
+            channel=channel,
+            message_timestamp=message_ts,
+            thread_ts=message.get("thread_ts") or message_ts,
+            permalink=current_permalink,
+            posted_at=float(message_ts),
+            links=links,
+            user_display_name=user_display_name,
+        )
+        if claim is None:
+            return
+
+        try:
+            posted = deliver_duplicate_alert(
+                conn,
+                claim,
+                post=lambda text, thread_ts: say(text=text, thread_ts=thread_ts),
+                delete=lambda alert_channel, alert_ts: app.client.chat_delete(
+                    channel=alert_channel,
+                    ts=alert_ts,
+                ),
             )
-            
-            existing_link = cursor.fetchone()
-            
-            if existing_link:
-                # Link duplicato trovato
-                # existing_link è una tuple: (normalized_url, permalink, posted_date, duplicate_notified, message_timestamp)
-                original_permalink = existing_link[1] if len(existing_link) > 1 else ""
-                posted_date_str = existing_link[2] if len(existing_link) > 2 else "unknown"
-                already_notified = existing_link[3] if len(existing_link) > 3 else 0
-                previous_message_ts = existing_link[4] if len(existing_link) > 4 else ""
-                
-                # Logging dettagliato per debug
-                logger.info(
-                    f"DUPLICATE_LINK_DETECTED: original_url='{original_url}' "
-                    f"normalized_url='{normalized_url}' "
-                    f"previous_permalink='{original_permalink}' "
-                    f"previous_posted_date='{posted_date_str}' "
-                    f"previous_message_ts='{previous_message_ts}' "
-                    f"already_notified={bool(already_notified)} "
-                    f"current_message_ts='{message.get('ts', '')}' "
-                    f"current_channel='{message.get('channel', '')}' "
-                    f"user='{user_display_name}'"
-                )
-                
-                # Notifica solo se non è già stato notificato
-                if not already_notified:
-                    response_text = f"Ciao {user_display_name}, questo link è stato già postato e lo trovi qui: {original_permalink}"
-
-                    try:
-                        # Rispondi nel thread se il messaggio è parte di un thread, altrimenti come risposta normale
-                        if "thread_ts" in message:
-                            # Se è già un thread, rispondi nello stesso thread
-                            result = say(text=response_text, thread_ts=message["thread_ts"])
-                            parent_ts = message["thread_ts"]
-                            logger.debug(f"Sent duplicate notification in existing thread: {message.get('thread_ts')}")
-                        else:
-                            # Se non è un thread, crea una risposta nel thread del messaggio originale
-                            result = say(text=response_text, thread_ts=message["ts"])
-                            parent_ts = message["ts"]
-                            logger.debug(f"Sent duplicate notification in new thread: {message.get('ts')}")
-
-                        # Salva il timestamp dell'alert per poterlo cancellare se il messaggio parent viene cancellato
-                        alert_ts = result.get("ts") if result else None
-                        if alert_ts:
-                            cursor.execute(
-                                "INSERT OR REPLACE INTO duplicate_alerts (parent_message_ts, alert_message_ts, channel) VALUES (?, ?, ?)",
-                                (parent_ts, alert_ts, message["channel"])
-                            )
-                            conn.commit()
-                            logger.debug(f"Saved duplicate alert reference: parent_ts={parent_ts}, alert_ts={alert_ts}")
-
-                        # Aggiorna il flag duplicate_notified per il link trovato
-                        cursor.execute(
-                            """
-                            UPDATE posted_links
-                            SET duplicate_notified = 1
-                            WHERE normalized_url = ? AND message_timestamp = ?
-                            """,
-                            (normalized_url, previous_message_ts)
-                        )
-                        conn.commit()
-                        logger.debug(f"Marked link as notified: {normalized_url} (message_ts: {previous_message_ts})")
-                    except Exception as e:
-                        logger.error(f"Error sending duplicate link notification or updating flag: {e}")
-                        conn.rollback()
-                else:
-                    logger.debug(f"Link already notified, skipping notification: {normalized_url}")
-                
-                # NON salvare il link se è duplicato
-                logger.debug(f"Skipping database insert for duplicate link: {normalized_url}")
-                continue
-            
-            # Link non duplicato: salvalo nella tabella
-            logger.debug(
-                f"NEW_LINK_SAVING: original_url='{original_url}' "
-                f"normalized_url='{normalized_url}' "
-                f"message_ts='{message.get('ts', '')}' "
-                f"channel='{message.get('channel', '')}'"
+            if not posted:
+                return
+            logger.info(
+                "EXACT_LINK_DUPLICATE_ALERT: current=%s source=%s",
+                message_ts,
+                claim.source_message_ts,
             )
-            
-            try:
-                timestamp = float(message.get("ts", 0))
-                posted_date = datetime.fromtimestamp(timestamp).isoformat()
-                
-                cursor.execute(
-                    """
-                    INSERT OR IGNORE INTO posted_links 
-                    (normalized_url, original_url, message_timestamp, channel, permalink, posted_date, duplicate_notified)
-                    VALUES (?, ?, ?, ?, ?, ?, 0)
-                    """,
-                    (
-                        normalized_url,
-                        original_url,
-                        message["ts"],
-                        message["channel"],
-                        current_permalink,
-                        posted_date
-                    )
-                )
-                conn.commit()
-                logger.debug(f"Successfully saved new link to database: {normalized_url}")
-            except Exception as e:
-                logger.error(f"Error storing link in database: {e}")
-                conn.rollback()
-                
+        except Exception:
+            raise
     except Exception as e:
         logger.error(f"Error in check_and_store_links: {e}")
-        conn.rollback()
+        logger.error(traceback.format_exc())
     finally:
         conn.close()
 
@@ -1093,12 +981,13 @@ def handle_message(message, say):
     elif "user" not in message:
         logger.warning("No valid user. Previous event not saved")
     else:  # Otherwise save the message to the archive.
-        # get the permalink only if the message is not the main post (slack bug), otherwise leave it empty
-        if "thread_ts" in message:
+        # Duplicate alerts need a citation for roots and replies alike.
+        try:
             permalink = app.client.chat_getPermalink(
                 channel=message["channel"], message_ts=message["ts"]
             )
-        else:
+        except Exception as e:
+            logger.warning(f"Could not get permalink while archiving message: {e}")
             permalink = {'permalink': ''}
 
         # Save original message data before opt-out check

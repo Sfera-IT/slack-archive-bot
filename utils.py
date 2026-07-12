@@ -576,6 +576,25 @@ def migrate_db(conn, cursor):
         ON message_links(duplicate_checked_at, posted_at)
         """
     )
+    # Importa le righe legacy senza cambiare o eliminare posted_links. I
+    # duplicati storici restano così candidati del nuovo percorso.
+    cursor.execute(
+        """
+        INSERT OR IGNORE INTO message_links
+        (channel, message_timestamp, thread_ts, normalized_url, original_url,
+         permalink, posted_at)
+        SELECT p.channel,
+               p.message_timestamp,
+               COALESCE(m.thread_ts, p.message_timestamp),
+               p.normalized_url,
+               p.original_url,
+               p.permalink,
+               COALESCE(CAST(m.timestamp AS REAL), CAST(strftime('%s', p.posted_date) AS REAL), 0)
+        FROM posted_links p
+        LEFT JOIN messages m
+          ON m.channel = p.channel AND m.timestamp = p.message_timestamp
+        """
+    )
 
     # Una coda durevole per URL (non per messaggio): più messaggi che puntano
     # allo stesso documento condividono un solo fetch. INSERT OR IGNORE e il
@@ -600,6 +619,37 @@ def migrate_db(conn, cursor):
         """
         CREATE INDEX IF NOT EXISTS idx_link_enrichment_jobs_claim
         ON link_enrichment_jobs(status, available_at, created_at)
+        """
+    )
+
+    # Un solo alert di duplicato per messaggio nuovo. Il claim token evita che
+    # eventi Slack concorrenti pubblichino lo stesso avviso due volte.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS link_duplicate_alerts (
+            current_channel TEXT NOT NULL,
+            current_message_ts TEXT NOT NULL,
+            current_thread_ts TEXT NOT NULL,
+            source_channel TEXT NOT NULL,
+            source_message_ts TEXT NOT NULL,
+            source_permalink TEXT NOT NULL,
+            match_type TEXT NOT NULL,
+            score REAL,
+            alert_message_ts TEXT NOT NULL DEFAULT '',
+            alert_text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'claimed',
+            claim_token TEXT NOT NULL,
+            claimed_at REAL NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (current_channel, current_message_ts)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_link_duplicate_alerts_source
+        ON link_duplicate_alerts(source_channel, source_message_ts)
         """
     )
     conn.commit()

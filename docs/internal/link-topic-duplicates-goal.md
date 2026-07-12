@@ -123,6 +123,10 @@ Material decisions:
 - The same fetch deadline covers DNS through bounded dnspython A/AAAA lookups;
   OS `getaddrinfo` was rejected for production because it cannot be cancelled
   reliably within the worker's total budget.
+- Duplicate alert delivery is fail-closed across the non-atomic Slack/SQLite
+  boundary: a post with unconfirmed cleanup retains `claimed` or `uncertain`
+  suppression state and is never automatically reclaimed, because reposting
+  would violate the at-most-one alert invariant.
 
 ## Success Criteria
 
@@ -157,7 +161,7 @@ The goal is complete only when:
 ## Milestones
 
 - [x] Milestone 1: Durable safe link enrichment foundation
-- [ ] Milestone 2: Deterministic duplicate processing for every link message
+- [x] Milestone 2: Deterministic duplicate processing for every link message
 - [ ] Milestone 3: Same-content and same-story matching, lifecycle, and operations
 
 ### Checkpoint Protocol
@@ -270,7 +274,25 @@ Verification:
 UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests/test_link_duplicates.py tests/test_utils.py
 ```
 
-Status: Not started.
+Status: Complete on 2026-07-12. Milestone-start commit: `40d4dec`.
+
+- Outcome: every external link in a root or reply is recorded and queued;
+  deterministic normalized-URL matches use the 45-day window, suppress the same
+  thread, fail closed across private-channel boundaries, choose one newest
+  source, and reserve one current-message-owned alert. Legacy `posted_links`
+  rows are backfilled without mutation.
+- Verification:
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests/test_link_duplicates.py tests/test_utils.py`
+    passed: 26 tests.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run pytest tests`
+    passed: 89 tests.
+  - `UV_CACHE_DIR=/private/tmp/slack-archive-bot-goal-uv-cache uv run python -m py_compile archivebot.py link_duplicates.py link_enrichment.py utils.py`
+    passed.
+  - `git diff --check` passed.
+- Adversarial review: two repair rounds made the Slack-post/SQLite-finalize
+  boundary fail closed for known and ambiguous outcomes; final result `CLEAN`.
+  Residual non-blocking tradeoff: `claimed`/`uncertain` rows intentionally
+  suppress indefinitely when delivery cannot be disproved.
 
 ## Milestone 3: Same-Content And Same-Story Matching, Lifecycle, And Operations
 
