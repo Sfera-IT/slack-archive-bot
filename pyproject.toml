@@ -30,7 +30,7 @@ dependencies = [
     "sentence-transformers==2.2.2",
     "slack-bolt==1.18.0",
     "trafilatura==2.1.0",
-    "torch==2.12.1",
+    "torch==2.13.0",
     "urllib3==2.7.0",
     "watchdog==4.0.1",
     "werkzeug==3.1.6",
