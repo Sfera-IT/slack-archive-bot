@@ -221,10 +221,12 @@ Engaged replies use the same quota and show a clear retry time when it is reache
 AI diagnostics are disabled by default. An administrator can enable sanitized
 private error reports by sending the bot a DM containing:
 
-        /debug
+        debug on
 
-Sending `/debug` again disables them. Explicit forms are also available:
-`/debug on`, `/debug off`, and `/debug status`. Reports include a correlation ID,
+The reliable DM forms are `debug`, `debug on`, `debug off`, and `debug status`.
+They do not require Slack Slash Command configuration. If `/debug` is registered
+in the Slack app, the same arguments are also handled as a native command.
+Reports include a correlation ID,
 the failing flow (including engaged threads), API metadata, and a bounded stack
 without prompt contents, local variables, tokens, or credentials. Public channels
 only receive the correlation ID.
