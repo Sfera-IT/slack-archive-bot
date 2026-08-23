@@ -161,9 +161,9 @@ def test_agent_returns_slack_and_sferaarchive_links_for_each_source():
     assert "Ho trovato la proposta" in answer
     assert "*Fonti*" in answer
     assert "https://sferait-ws.slack.com/archives/C1" in answer
-    assert "https://sferaarchive-client.vercel.app/" in answer
     assert "|Slack>" in answer
     assert "|SferaArchive>" in answer
+    assert "channel=C1&thread_ts=1600000000.1&message_ts=1600000000.1" in answer
     assert responses.calls[0]["model"] == "gpt-5.6-sol"
     assert responses.calls[0]["reasoning"] == {"effort": "medium"}
     assert responses.calls[0]["tool_choice"] == {
