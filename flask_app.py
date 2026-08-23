@@ -8,7 +8,6 @@ from slack_bolt.adapter.flask import SlackRequestHandler
 from archivebot import app, update_users
 handler = SlackRequestHandler(app)
 import datetime
-import hashlib
 import hmac
 import logging
 import secrets
@@ -313,24 +312,7 @@ def get_db_connection():
     return conn
 
 
-def _oauth_state_digest(state):
-    # OAuth state values are high-entropy nonces, not passwords. Key the
-    # persisted digest as defense in depth so a leaked state table cannot be
-    # used to validate captured values without the application secret.
-    digest_key = hashlib.blake2b(
-        str(flask_app.secret_key).encode('utf-8'),
-        digest_size=64,
-        person=b'sfera-oauth-key',
-    ).digest()
-    return hashlib.blake2b(
-        state.encode('utf-8'),
-        key=digest_key,
-        digest_size=32,
-        person=b'sfera-oauth-v1',
-    ).hexdigest()
-
-
-def _store_oauth_state(state, return_to):
+def _store_oauth_state(storage_key, return_to):
     conn = get_db_connection()
     now = int(time.time())
     try:
@@ -362,14 +344,14 @@ def _store_oauth_state(state, return_to):
             )
         conn.execute(
             'INSERT INTO oauth_states(state_hash, created_at, return_to) VALUES (?, ?, ?)',
-            (_oauth_state_digest(state), now, return_to),
+            (storage_key, now, return_to),
         )
         conn.commit()
     finally:
         conn.close()
 
 
-def _consume_oauth_state(state):
+def _consume_oauth_state(storage_key):
     """Atomically consume a server-side state nonce and return its redirect."""
     conn = get_db_connection()
     now = int(time.time())
@@ -379,13 +361,15 @@ def _consume_oauth_state(state):
             'DELETE FROM oauth_states WHERE created_at <= ?',
             (now - OAUTH_STATE_TTL_SECONDS,),
         )
-        state_hash = _oauth_state_digest(state)
         row = conn.execute(
             'SELECT return_to FROM oauth_states WHERE state_hash = ?',
-            (state_hash,),
+            (storage_key,),
         ).fetchone()
         if row:
-            conn.execute('DELETE FROM oauth_states WHERE state_hash = ?', (state_hash,))
+            conn.execute(
+                'DELETE FROM oauth_states WHERE state_hash = ?',
+                (storage_key,),
+            )
         conn.commit()
         return row['return_to'] if row else None
     finally:
@@ -657,13 +641,15 @@ def singleflight_web_ai_job(job_name):
 @flask_app.route('/login')
 def login():
     state = secrets.token_urlsafe(32)
+    storage_key = secrets.token_urlsafe(32)
     return_to = _validated_return_to(request.args.get('return_to'))
     try:
-        _store_oauth_state(state, return_to)
+        _store_oauth_state(storage_key, return_to)
     except sqlite3.Error as exception:
         return log_and_return_error(exception, 503)
     session['oauth_request'] = {
         'state': state,
+        'storage_key': storage_key,
         'created_at': int(time.time()),
     }
     slack_auth_url = 'https://slack.com/oauth/v2/authorize?' + urlencode({
@@ -685,6 +671,7 @@ def oauth_callback():
         return 'Authorization failed.', 400
 
     expected_state = str(oauth_request.get('state') or '')
+    storage_key = str(oauth_request.get('storage_key') or '')
     created_at = oauth_request.get('created_at')
     try:
         state_age = int(time.time()) - int(created_at)
@@ -693,19 +680,20 @@ def oauth_callback():
         state_is_fresh = False
     if (
         not expected_state
+        or not storage_key
         or not supplied_state
         or not state_is_fresh
         or not hmac.compare_digest(expected_state, supplied_state)
     ):
-        if expected_state:
+        if storage_key:
             try:
-                _consume_oauth_state(expected_state)
+                _consume_oauth_state(storage_key)
             except sqlite3.Error:
                 logger.error('Failed to invalidate rejected OAuth state')
         return 'Authorization failed.', 400
 
     try:
-        return_to = _consume_oauth_state(supplied_state)
+        return_to = _consume_oauth_state(storage_key)
     except sqlite3.Error as exception:
         return log_and_return_error(exception, 503)
     if not return_to:

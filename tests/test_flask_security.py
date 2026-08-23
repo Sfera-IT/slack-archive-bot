@@ -1,5 +1,4 @@
 import datetime
-import hashlib
 import importlib
 import os
 import sqlite3
@@ -206,28 +205,20 @@ def test_oauth_state_is_one_time_and_jwt_contains_no_slack_token(
     assert len(calls) == 1
 
 
-def test_oauth_state_is_persisted_as_keyed_digest(web_module):
+def test_oauth_state_uses_an_independent_server_side_storage_key(web_module):
     module = web_module
-    state = "high-entropy-oauth-state"
-    module._store_oauth_state(state, "/")
+    client = module.flask_app.test_client()
+    login_response = client.get("/login")
+    state = parse_qs(urlsplit(login_response.location).query)["state"][0]
+    with client.session_transaction() as oauth_session:
+        storage_key = oauth_session["oauth_request"]["storage_key"]
 
     conn = sqlite3.connect(os.environ["DB_PATH"])
     stored = conn.execute("SELECT state_hash FROM oauth_states").fetchone()[0]
     conn.close()
 
-    digest_key = hashlib.blake2b(
-        str(module.flask_app.secret_key).encode("utf-8"),
-        digest_size=64,
-        person=b"sfera-oauth-key",
-    ).digest()
-    expected = hashlib.blake2b(
-        state.encode("utf-8"),
-        key=digest_key,
-        digest_size=32,
-        person=b"sfera-oauth-v1",
-    ).hexdigest()
-    assert stored == expected
-    assert stored != hashlib.sha256(state.encode("utf-8")).hexdigest()
+    assert stored == storage_key
+    assert stored != state
 
 
 def test_oauth_rejects_unexpected_workspace_and_external_return_to(
