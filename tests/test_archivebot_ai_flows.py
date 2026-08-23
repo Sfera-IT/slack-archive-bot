@@ -15,8 +15,10 @@ if ROOT_DIR not in sys.path:
 class FakeSlackClient:
     def __init__(self):
         self.posted = []
+        self.auth_calls = 0
 
     def auth_test(self):
+        self.auth_calls += 1
         return {"user_id": "UBOT"}
 
     def users_info(self, user):
@@ -30,6 +32,7 @@ class FakeSlackClient:
 class FakeSlackApp:
     def __init__(self, **_kwargs):
         self.client = FakeSlackClient()
+        self.error_handler = None
 
     def _decorator(self, *_args, **_kwargs):
         return lambda function: function
@@ -38,6 +41,10 @@ class FakeSlackApp:
     message = _decorator
     action = _decorator
     command = _decorator
+
+    def error(self, function):
+        self.error_handler = function
+        return function
 
 
 @pytest.fixture
@@ -55,6 +62,11 @@ def archivebot_module(monkeypatch, tmp_path):
     module.migrate_db(conn, cursor)
     conn.close()
     return module
+
+
+def test_import_does_not_call_slack_api(archivebot_module):
+    assert archivebot_module.app.client.auth_calls == 0
+    assert archivebot_module.app._bot_user_id
 
 
 def test_private_debug_command_is_admin_only_and_toggles_from_disabled(
@@ -218,6 +230,86 @@ def test_engage_claims_each_event_once_and_runs_the_ai_reply(
     ).fetchone()
     conn.close()
     assert row == ("100.2",)
+
+
+def test_message_replied_wrapper_routes_reply_to_engage(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    _seed_engaged_thread(bot)
+    routed = []
+    monkeypatch.setattr(
+        bot.app.client,
+        "conversations_replies",
+        lambda **_kwargs: {
+            "messages": [
+                {"user": "UOWNER", "text": "root", "ts": "100.1"},
+                {"user": "U1", "text": "mi ricevi?", "ts": "100.2"},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        bot,
+        "handle_message",
+        lambda message, say: routed.append((message, say)),
+    )
+    say = lambda *_args, **_kwargs: None
+
+    bot.handle_message_replied(
+        {
+            "channel": "C1",
+            "channel_type": "channel",
+            "message": {
+                "ts": "100.1",
+                "latest_reply": "100.2",
+                "replies": [{"user": "U1", "ts": "100.2"}],
+            },
+        },
+        say,
+    )
+
+    assert len(routed) == 1
+    assert routed[0][0]["text"] == "mi ricevi?"
+    assert routed[0][0]["thread_ts"] == "100.1"
+    assert routed[0][1] is say
+
+
+def test_message_replied_failure_reaches_private_debug_pipeline(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    _seed_engaged_thread(bot)
+    reported = []
+    monkeypatch.setattr(
+        bot.app.client,
+        "conversations_replies",
+        lambda **_kwargs: {
+            "messages": [],
+            "response_metadata": {"next_cursor": ""},
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        bot,
+        "_report_ai_error",
+        lambda exception, **kwargs: reported.append((exception, kwargs)),
+    )
+
+    bot.handle_message_replied(
+        {
+            "channel": "C1",
+            "message": {"ts": "100.1", "latest_reply": "100.2"},
+        },
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert len(reported) == 1
+    assert reported[0][1]["source"] == "message_replied_router"
+    assert reported[0][1]["thread_ts"] == "100.1"
 
 
 def test_engage_ignores_out_of_order_slack_events(archivebot_module, monkeypatch):

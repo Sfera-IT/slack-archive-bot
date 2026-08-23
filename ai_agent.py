@@ -297,7 +297,7 @@ def run_archive_agent(
 def render_sources(
     answer: str, evidence: EvidenceRegistry, *, fallback_limit: int = 5
 ) -> str:
-    """Append verifiable Slack permalinks for evidence IDs used by the model."""
+    """Append Slack and durable SferaArchive links for cited evidence."""
     answer = (answer or "Non sono riuscito a produrre una risposta affidabile.").strip()
     answer = re.sub(
         r"\[(S\d+)\]",
@@ -326,10 +326,15 @@ def render_sources(
         label = (
             f"[{source_id}] #{hit.channel_name} · {hit.user_name} · {hit.date_label}"
         )
+        links = []
         if hit.permalink:
-            source_lines.append(f"• <{hit.permalink}|{label}>")
+            links.append(f"<{hit.permalink}|Slack>")
+        if hit.archive_url:
+            links.append(f"<{hit.archive_url}|SferaArchive>")
+        if links:
+            source_lines.append(f"• {label} — " + " · ".join(links))
         else:
-            source_lines.append(f"• {label} _(permalink non disponibile)_")
+            source_lines.append(f"• {label} _(link non disponibile)_")
 
     if not source_lines:
         return answer

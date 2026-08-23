@@ -1581,7 +1581,7 @@ wheels = [
 
 [[package]]
 name = "slack-archive-bot"
-version = "2.2.2"
+version = "2.2.3"
 source = { virtual = "." }
 dependencies = [
     { name = "blinker" },
