@@ -25,6 +25,7 @@ import openai
 from pydub import AudioSegment
 import io
 from openai import OpenAI
+from ai_agent import generate_text_response
 from pathlib import Path
 from flask import send_file
 
@@ -564,11 +565,11 @@ def generate_podcast_audio(podcast_content):
 # Aggiungi questa funzione per generare il contenuto del podcast
 def generate_podcast_content(formatted_messages):
     client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-    response = client.chat.completions.create(
+    return generate_text_response(
+        client,
         model=DEFAULT_OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": "Sei un membro della Community Sfera IT che crea contenuti per podcast basati sulle conversazioni della community. Il tuo compito è creare un riassunto scorrevole e coinvolgente, adatto all'ascolto, come se stessi parlando con altri membri della community."},
-            {"role": "user", "content": f"""
+        instructions="Sei un membro della Community Sfera IT che crea contenuti per podcast basati sulle conversazioni della community. Il tuo compito è creare un riassunto scorrevole e coinvolgente, adatto all'ascolto, come se stessi parlando con altri membri della community.",
+        input_text=f"""
                 Crea un podcast basato sulle seguenti conversazioni della Community Sfera IT. Il podcast deve:
                 1. Essere scorrevole e naturale, come se stessi chiacchierando con altri membri della community
                 2. Essere coinvolgente e interessante da ascoltare, riferendoti direttamente alla "Community Sfera IT"
@@ -585,13 +586,10 @@ def generate_podcast_content(formatted_messages):
 
                 Ecco le conversazioni:
                 {formatted_messages}
-            """}
-        ],
-        max_completion_tokens=8192,
+            """,
+        max_output_tokens=8192,
         reasoning_effort="low",
     )
-    
-    return response.choices[0].message.content
 
 
 @flask_app.route('/generate_digest', methods=['POST'])
@@ -678,11 +676,11 @@ def generate_digest():
     
     # Generate summary using OpenAI
     client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-    response = client.chat.completions.create(
+    summary = generate_text_response(
+        client,
         model=DEFAULT_OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": "Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano."},
-            {"role": "user", "content": f"""
+        instructions="Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano.",
+        input_text=f"""
                 Sei un assistente che riassume le conversazioni di un workspace di Slack. Fornirai riassunti molto dettagliati, usando almeno 3000 parole, e sempre in italiano.
                 In allegato ti invio il tracciato delle ultime 24 ore di un workspace Slack. 
 
@@ -701,13 +699,10 @@ def generate_digest():
                 - È importante che il digest raccolga tutte le conversazioni delle ultime ore e non ne escluda nessuna.
                 - Ricorda che il nome dell'utente che ha inviato il post o ha avviato la conversazione è sempre PRIMA del messaggio, non dopo
 
-                {formatted_messages}"""}
-        ],
-        max_completion_tokens=16384,
+                {formatted_messages}""",
+        max_output_tokens=16384,
         reasoning_effort="medium",
     )
-    
-    summary = response.choices[0].message.content
 
     # Calculate the period
     end_date = datetime.datetime.utcnow()
@@ -777,11 +772,11 @@ def digest_details():
 
     # Generate details using OpenAI
     client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-    response = client.chat.completions.create(
+    details = generate_text_response(
+        client,
         model=DEFAULT_OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": "Sei un assistente che fornisce dettagli sulle conversazioni di un workspace Slack in base a specifiche richieste."},
-            {"role": "user", "content": f"""Dati i seguenti post originali, fornisci dettagli specifici in risposta alla query dell'utente. 
+        instructions="Sei un assistente che fornisce dettagli sulle conversazioni di un workspace Slack in base a specifiche richieste.",
+        input_text=f"""Dati i seguenti post originali, fornisci dettagli specifici in risposta alla query dell'utente.
             Usa i post originali per fornire informazioni precise e dettagliate.
 
             Post originali:
@@ -789,13 +784,10 @@ def digest_details():
 
             Query dell'utente: {query}
 
-            Fornisci una risposta dettagliata, in italiano e in formato markdown."""}
-        ],
-        max_completion_tokens=4096,
+            Fornisci una risposta dettagliata, in italiano e in formato markdown.""",
+        max_output_tokens=4096,
         reasoning_effort="medium",
     )
-    
-    details = response.choices[0].message.content
 
     # Salva i dettagli generati nel database
     try:
@@ -915,17 +907,14 @@ def chat():
 
     # Call OpenAI
     client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-    response = client.chat.completions.create(
+    ai_response = generate_text_response(
+        client,
         model=DEFAULT_OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": "Sei un assistente che risponde alle domande relative alle conversazioni di un workspace di Slack. Ti verranno passate delle conversazioni e una serie di domande a cui dovrai rispondere con precisione."},
-            {"role": "user", "content": prompt}
-        ],
-        max_completion_tokens=4096,
+        instructions="Sei un assistente che risponde alle domande relative alle conversazioni di un workspace di Slack. Ti verranno passate delle conversazioni e una serie di domande a cui dovrai rispondere con precisione.",
+        input_text=prompt,
+        max_output_tokens=4096,
         reasoning_effort="medium",
     )
-
-    ai_response = response.choices[0].message.content.strip()
     conversation.append({
         'user_name': 'AI',
         'message': ai_response,

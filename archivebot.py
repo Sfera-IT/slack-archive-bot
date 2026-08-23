@@ -11,9 +11,15 @@ from datetime import datetime, timedelta
 from slack_bolt import App
 from openai import OpenAI
 
-from ai_agent import DEFAULT_AI_MODEL, chat_tool_reasoning_effort, run_archive_agent
+from ai_agent import DEFAULT_AI_MODEL, generate_text_response, run_archive_agent
 from ai_context import format_messages_for_prompt, get_ai_context_scope, is_engage_request
-from ai_diagnostics import new_ai_error_id, send_private_ai_error
+from ai_diagnostics import (
+    get_ai_debug_recipients,
+    is_ai_debug_enabled,
+    new_ai_error_id,
+    send_private_ai_error,
+    set_ai_debug_enabled,
+)
 from archive_search import ArchiveSearchEngine, EvidenceRegistry
 from utils import claim_xcancel_alert, db_connect, finalize_xcancel_alert, migrate_db
 from url_cleaner import UrlCleaner
@@ -132,6 +138,63 @@ MENTION_HINT_PROMPT = (
     "NON scrivere `@nome` o `@DisplayName`: non viene riconosciuto da Slack. "
     "Se non hai un ID disponibile per quella persona, evita la mention.\n"
 )
+
+
+def _report_ai_error(exception, *, event, source, say=None, thread_ts=None):
+    """Log one AI failure, notify opted-in admins, and post a safe reference."""
+    error_id = new_ai_error_id()
+    logger.error(
+        "[AI][%s][%s] Request failed: %s",
+        error_id,
+        source,
+        exception,
+        exc_info=True,
+    )
+
+    recipients = []
+    try:
+        conn, cursor = db_connect(database_path)
+        try:
+            recipients = get_ai_debug_recipients(cursor)
+        finally:
+            conn.close()
+    except Exception as subscription_error:
+        logger.exception(
+            "[AI][%s] Failed to load private debug subscribers: %s",
+            error_id,
+            subscription_error,
+        )
+
+    for recipient_user_id in recipients:
+        try:
+            send_private_ai_error(
+                app.client,
+                exception,
+                event=event,
+                model=AI_RESPONSE_MODEL,
+                reasoning_effort=AI_REASONING_EFFORT,
+                error_id=error_id,
+                recipient_user_id=recipient_user_id,
+                source=source,
+            )
+        except Exception as debug_error:
+            logger.exception(
+                "[AI][%s] Failed to send private debug to subscriber %s: %s",
+                error_id,
+                recipient_user_id,
+                debug_error,
+            )
+
+    if say is not None:
+        try:
+            say(
+                "Mi dispiace, c'è stato un errore nel processare la tua richiesta. "
+                f"Riferimento: `{error_id}`.",
+                thread_ts=thread_ts or event.get("thread_ts") or event.get("ts"),
+            )
+        except Exception:
+            logger.exception("[AI][%s] Failed to post public error reference", error_id)
+    return error_id
 
 # Nota: clown_users è ora memorizzato nel database per essere condiviso tra worker Gunicorn
 # Le funzioni seguenti gestiscono la lettura/scrittura dal database
@@ -325,6 +388,37 @@ def handle_query(event, cursor, say):
     user_id = event.get("user", "unknown")
     
     logger.info(f"[CLOWN] Received DM from user {user_id}, text: '{text}'")
+
+    # Debug AI privato: opt-in esplicito e riservato agli amministratori.
+    debug_match = re.fullmatch(
+        r"/debug(?:\s+(on|off|status))?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if debug_match:
+        if user_id not in ADMIN_USERS:
+            logger.warning("[AI][DEBUG] Non-admin user %s attempted /debug", user_id)
+            say("❌ Solo gli amministratori possono ricevere il debug AI privato.")
+            return
+
+        action = (debug_match.group(1) or "toggle").lower()
+        currently_enabled = is_ai_debug_enabled(cursor, user_id)
+        if action == "status":
+            state = "attivo" if currently_enabled else "disattivato"
+            say(f"🛠️ Debug AI privato: *{state}*.")
+            return
+
+        enabled = not currently_enabled if action == "toggle" else action == "on"
+        set_ai_debug_enabled(cursor, user_id, enabled)
+        cursor.connection.commit()
+        if enabled:
+            say(
+                "🛠️ Debug AI privato attivato. Riceverai gli errori sanitizzati "
+                "di menzioni, ricerche ed engage. Invia di nuovo `/debug` per disattivarlo."
+            )
+        else:
+            say("🛠️ Debug AI privato disattivato.")
+        return
     
     # Gestisci comando /clown
     if text.startswith("/clown "):
@@ -1016,8 +1110,14 @@ def handle_message(message, say):
     
     logger.info(f"[CLOWN] handle_message called - user: {user_id}, channel_type: {channel_type}, text_preview: '{text_preview}...'")
     
-    if "text" not in message or message["user"] == "USLACKBOT":
-        logger.debug("[CLOWN] Skipping message: no text or from USLACKBOT")
+    message_user = message.get("user")
+    if (
+        "text" not in message
+        or not message_user
+        or message_user == "USLACKBOT"
+        or message_user == app._bot_user_id
+    ):
+        logger.debug("[CLOWN] Skipping message: no user/text or from a bot")
         return
 
     # Route links before engage/mention/stop early returns. app_mention and
@@ -1054,15 +1154,24 @@ def handle_message(message, say):
             handle_app_mention(message, say)
             return
         except Exception as e:
-            logger.error(f"[AI] Error handling mention in handle_message: {e}")
-            logger.error(traceback.format_exc())
+            _report_ai_error(
+                e,
+                event=message,
+                source="message_mention_router",
+                say=say,
+                thread_ts=message.get("thread_ts") or message.get("ts"),
+            )
+            return
 
     conn, cursor = db_connect(database_path)
 
     # If it's a DM, treat it as a search query
-    if message["channel_type"] == "im":
+    if message.get("channel_type") == "im":
         logger.info(f"[CLOWN] Message is a DM, routing to handle_query")
-        handle_query(message, cursor, say)
+        try:
+            handle_query(message, cursor, say)
+        finally:
+            conn.close()
     elif "user" not in message:
         logger.warning("No valid user. Previous event not saved")
     else:  # Otherwise save the message to the archive.
@@ -1218,8 +1327,36 @@ def handle_message_default(message, say):
     handle_message(message, say)
 
 
-def get_thread_messages(channel, thread_ts):
-    """Recupera tutti i messaggi di un thread."""
+def get_archived_thread_messages(channel, thread_ts):
+    """Read a thread from the local archive when Slack history is unavailable."""
+    conn, cursor = db_connect(database_path)
+    try:
+        cursor.execute(
+            """
+            SELECT message, user, timestamp
+            FROM messages
+            WHERE channel = ? AND thread_ts = ?
+            ORDER BY CAST(timestamp AS REAL), timestamp
+            """,
+            (channel, thread_ts),
+        )
+        messages = [
+            {"text": text, "user": user_id, "ts": ts}
+            for text, user_id, ts in cursor.fetchall()
+        ]
+    finally:
+        conn.close()
+    return build_ai_context_messages(messages)
+
+
+def get_thread_messages(
+    channel,
+    thread_ts,
+    *,
+    fallback_to_archive=False,
+    raise_errors=False,
+):
+    """Recupera tutti i messaggi di un thread, con fallback locale opzionale."""
     try:
         cursor = None
 
@@ -1240,11 +1377,25 @@ def get_thread_messages(channel, thread_ts):
         # Ordina i messaggi per timestamp
         messages.sort(key=lambda x: float(x.get("ts", 0)))
 
-        return build_ai_context_messages(messages)
+        formatted = build_ai_context_messages(messages)
+        if formatted or not fallback_to_archive:
+            return formatted
+        return get_archived_thread_messages(channel, thread_ts)
 
     except Exception as e:
         logger.error(f"Error getting thread messages: {e}")
         logger.error(traceback.format_exc())
+        if fallback_to_archive:
+            archived = get_archived_thread_messages(channel, thread_ts)
+            if archived:
+                logger.warning(
+                    "Using archived fallback for thread %s in channel %s",
+                    thread_ts,
+                    channel,
+                )
+                return archived
+        if raise_errors:
+            raise
         return []
 
 
@@ -1348,6 +1499,29 @@ def get_user_name_map(db_cursor, user_ids):
 
 
 
+def format_ai_rate_limit_footer(throttle_info):
+    """Render the user-visible usage counters returned by check_ai_throttle."""
+    return (
+        "📊 Rate limit per user: "
+        f"{throttle_info['requests_last_minute']}/{throttle_info['limit_per_minute']} "
+        "al minuto, "
+        f"{throttle_info['requests_last_hour']}/{throttle_info['limit_per_hour']} "
+        "all'ora"
+    )
+
+
+def _next_ai_request_time(cursor, user_id, cutoff, window_seconds):
+    cursor.execute(
+        "SELECT MIN(timestamp) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
+        (cutoff, user_id),
+    )
+    row = cursor.fetchone()
+    oldest = row[0] if row else None
+    if oldest is None:
+        return datetime.now()
+    return datetime.fromtimestamp(float(oldest) + window_seconds)
+
+
 def check_ai_throttle(conn, cursor, user_id, channel):
     """Controlla se la richiesta rispetta i limiti di throttle.
     Limiti: 2 messaggi al minuto, 10 messaggi ogni ora.
@@ -1368,6 +1542,9 @@ def check_ai_throttle(conn, cursor, user_id, channel):
     if deleted_count > 0:
         logger.debug(f"[AI] Cleaned up {deleted_count} old throttle records")
     conn.commit()
+
+    # Serializza count+insert tra worker Gunicorn per non superare il limite in gara.
+    cursor.execute("BEGIN IMMEDIATE")
     
     # Conta richieste nell'ultimo minuto (confronto numerico)
     cursor.execute(
@@ -1394,17 +1571,29 @@ def check_ai_throttle(conn, cursor, user_id, channel):
     
     # Controlla limiti
     if requests_last_minute >= 2:
-        # Calcola quando sarà possibile inviare di nuovo (tra 1 minuto)
-        next_available = (now + timedelta(minutes=1)).strftime("%H:%M:%S")
-        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_minute} richieste nell'ultimo minuto (limite: 2). Prova di nuovo dopo le {next_available}."
+        next_available = _next_ai_request_time(
+            cursor, user_id, one_minute_ago_timestamp, 60
+        ).strftime("%H:%M:%S")
+        message = (
+            f"⏱️ Limite raggiunto: hai già fatto {requests_last_minute} richieste "
+            f"nell'ultimo minuto. Riprova alle {next_available}.\n\n"
+            + format_ai_rate_limit_footer(throttle_info)
+        )
         logger.warning(f"[AI] Throttle exceeded: {requests_last_minute} requests in last minute (limit: 2)")
+        conn.commit()
         return False, message, throttle_info
     
     if requests_last_hour >= 10:
-        # Calcola quando sarà possibile inviare di nuovo (tra 1 ora)
-        next_available = (now + timedelta(hours=1)).strftime("%H:%M:%S")
-        message = f"⏱️ Troppe richieste! Hai già fatto {requests_last_hour} richieste nell'ultima ora (limite: 10). Prova di nuovo dopo le {next_available}."
+        next_available = _next_ai_request_time(
+            cursor, user_id, one_hour_ago_timestamp, 60 * 60
+        ).strftime("%H:%M:%S")
+        message = (
+            f"⏱️ Limite raggiunto: hai già fatto {requests_last_hour} richieste "
+            f"nell'ultima ora. Riprova alle {next_available}.\n\n"
+            + format_ai_rate_limit_footer(throttle_info)
+        )
         logger.warning(f"[AI] Throttle exceeded: {requests_last_hour} requests in last hour (limit: 10)")
+        conn.commit()
         return False, message, throttle_info
     
     # Registra la richiesta con timestamp Unix
@@ -1413,6 +1602,10 @@ def check_ai_throttle(conn, cursor, user_id, channel):
         (now_timestamp, user_id, channel)
     )
     conn.commit()
+
+    # I contatori ritornati e mostrati includono la richiesta appena accettata.
+    throttle_info["requests_last_minute"] += 1
+    throttle_info["requests_last_hour"] += 1
     
     logger.info(f"[AI] Throttle OK: {requests_last_minute}/2 per minuto, {requests_last_hour}/10 per ora (now_ts: {now_timestamp:.2f}, one_hour_ago_ts: {one_hour_ago_timestamp:.2f})")
     return True, None, throttle_info
@@ -1436,16 +1629,18 @@ def handle_app_mention(event, say):
         
         # Controlla throttle
         conn, cursor = db_connect(database_path)
-        allowed, throttle_message, throttle_info = check_ai_throttle(conn, cursor, user_id, channel)
+        try:
+            allowed, throttle_message, throttle_info = check_ai_throttle(
+                conn, cursor, user_id, channel
+            )
+        finally:
+            conn.close()
         
         logger.info(f"[AI] Throttle status: {throttle_info}")
         
         if not allowed:
             say(throttle_message, thread_ts=response_thread_ts)
-            conn.close()
             return
-        
-        conn.close()
         
         # Rimuovi la menzione del bot dal testo
         bot_user_id = app._bot_user_id
@@ -1487,8 +1682,7 @@ def handle_app_mention(event, say):
         openai_api_key = os.environ.get("OPENAI_API_KEY")
         if not openai_api_key:
             logger.error("[AI] OPENAI_API_KEY not set")
-            say("Errore: chiave API OpenAI non configurata.", thread_ts=response_thread_ts)
-            return
+            raise RuntimeError("OPENAI_API_KEY non configurata")
         
         client = OpenAI(api_key=openai_api_key)
         
@@ -1521,51 +1715,24 @@ def handle_app_mention(event, say):
             conn_ctx.close()
 
         logger.info(f"[AI] Received grounded response, length: {len(final_response)}")
+
+        final_response = (
+            final_response.rstrip()
+            + "\n\n"
+            + format_ai_rate_limit_footer(throttle_info)
+        )
         
         # Rispondi nel thread
         say(final_response, thread_ts=response_thread_ts)
         
     except Exception as e:
-        error_id = new_ai_error_id()
-        logger.exception("[AI][%s] Error handling app mention: %s", error_id, e)
-        debug_sent = False
-        user_id = event.get("user")
-        if user_id:
-            try:
-                send_private_ai_error(
-                    app.client,
-                    e,
-                        event=event,
-                        model=AI_RESPONSE_MODEL,
-                        reasoning_effort=chat_tool_reasoning_effort(
-                            AI_RESPONSE_MODEL, AI_REASONING_EFFORT
-                        ),
-                        error_id=error_id,
-                )
-                debug_sent = True
-            except Exception as debug_error:
-                logger.exception(
-                    "[AI][%s] Failed to send private debug to user %s: %s",
-                    error_id,
-                    user_id,
-                    debug_error,
-                )
-
-        public_message = (
-            "Mi dispiace, c'è stato un errore nel processare la tua richiesta. "
-            f"Riferimento: `{error_id}`."
+        _report_ai_error(
+            e,
+            event=event,
+            source="app_mention",
+            say=say,
+            thread_ts=event.get("thread_ts") or event.get("ts"),
         )
-        if debug_sent:
-            public_message += " Ti ho inviato i dettagli tecnici in privato."
-        else:
-            public_message += " Non sono riuscito a inviarti il debug privato."
-        try:
-            say(
-                public_message,
-                thread_ts=event.get("thread_ts", event.get("ts")),
-            )
-        except Exception:
-            logger.exception("[AI][%s] Failed to post public error reference", error_id)
 
 
 def _is_trash_channel(channel_id, cursor):
@@ -1687,18 +1854,16 @@ def _decide_engage(thread_messages, openai_client):
         "Se engage=false, reply può essere stringa vuota."
     )
     user_msg = f"Thread fino ad ora:\n{thread_text}\n\nDecidi se inserirti."
-    resp = openai_client.chat.completions.create(
+    raw = generate_text_response(
+        openai_client,
         model=AUTO_ENGAGE_DECISION_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_msg},
-        ],
-        max_completion_tokens=600,
+        instructions=system,
+        input_text=user_msg,
+        max_output_tokens=600,
         reasoning_effort="low",
-        response_format={"type": "json_object"},
+        text_format={"type": "json_object"},
     )
-    raw = resp.choices[0].message.content or "{}"
-    data = json.loads(raw)
+    data = json.loads(raw or "{}")
     return bool(data.get("engage")), _strip_bot_self_prefix((data.get("reply") or "").strip())
 
 
@@ -1725,18 +1890,16 @@ def _decide_clown(thread_messages, openai_client):
         "Il campo clown_user, se non null, deve essere ESATTAMENTE il nome utente come appare nel thread."
     )
     user_msg = f"Thread:\n{thread_text}\n\nChi (se qualcuno) è clown?"
-    resp = openai_client.chat.completions.create(
+    raw = generate_text_response(
+        openai_client,
         model=AUTO_ENGAGE_DECISION_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_msg},
-        ],
-        max_completion_tokens=300,
+        instructions=system,
+        input_text=user_msg,
+        max_output_tokens=300,
         reasoning_effort="low",
-        response_format={"type": "json_object"},
+        text_format={"type": "json_object"},
     )
-    raw = resp.choices[0].message.content or "{}"
-    data = json.loads(raw)
+    data = json.loads(raw or "{}")
     user = data.get("clown_user")
     reason = data.get("reason")
     if not user or not isinstance(user, str):
@@ -1926,7 +2089,15 @@ def _should_reply_now(thread_messages, bot_user_id):
     return replies_since_last_bot >= n_required, user_replies_count, replies_since_last_bot, n_required
 
 
-def _auto_reply_in_thread(channel, thread_ts, thread_messages, openai_client, say):
+def _auto_reply_in_thread(
+    channel,
+    thread_ts,
+    thread_messages,
+    openai_client,
+    say,
+    *,
+    response_suffix="",
+):
     """Reply in an engaged thread through the same grounded archive agent."""
     bot_user_id = app._bot_user_id
     latest_user_message = next(
@@ -1968,6 +2139,8 @@ def _auto_reply_in_thread(channel, thread_ts, thread_messages, openai_client, sa
 
     reply = _strip_bot_self_prefix(reply)
     if reply:
+        if response_suffix:
+            reply = reply.rstrip() + "\n\n" + response_suffix.strip()
         _say_engaged_thread_reply(say, reply, channel, thread_ts)
 
 
@@ -2036,7 +2209,12 @@ def _maybe_handle_engage_command(message, say):
         if was_stopped:
             say("Riattivato. Da ora rispondo a ogni nuovo messaggio in questo thread.", thread_ts=thread_ts)
         else:
-            say("Ok, resto ingaggiato su questo thread. Per fermarmi: `<@{}> stop`".format(bot_user_id), thread_ts=thread_ts)
+            say(
+                "Ingaggiato su questo thread: risponderò ai nuovi messaggi scritti "
+                "qui dentro, non ai nuovi messaggi fuori dal thread. "
+                "Per fermarmi: `<@{}> stop`".format(bot_user_id),
+                thread_ts=thread_ts,
+            )
         return True
     finally:
         conn.close()
@@ -2154,54 +2332,128 @@ def handle_engaged_stop_button(ack, body, client):
 
 def maybe_reply_to_engaged_thread(message, say):
     """Risponde a ogni nuovo messaggio utente nei thread ingaggiati con @bot /engage."""
-    try:
-        thread_ts = message.get("thread_ts")
-        ts = message.get("ts")
-        channel = message.get("channel")
-        msg_user = message.get("user")
+    thread_ts = message.get("thread_ts")
+    ts = message.get("ts")
+    channel = message.get("channel")
+    msg_user = message.get("user")
+    previous_last_reply_ts = None
+    claimed = False
 
+    try:
         if msg_user == app._bot_user_id:
             return
 
-        if not thread_ts or thread_ts == ts:
+        if not thread_ts or thread_ts == ts or not channel or not ts:
             return
 
         conn, cursor = db_connect(database_path)
         try:
+            cursor.execute("BEGIN IMMEDIATE")
             cursor.execute(
-                "SELECT engaged, stopped FROM engaged_threads WHERE thread_ts = ? AND channel = ?",
+                "SELECT engaged, stopped, last_reply_ts FROM engaged_threads "
+                "WHERE thread_ts = ? AND channel = ?",
                 (thread_ts, channel),
             )
             row = cursor.fetchone()
             if not row or not row[0] or row[1]:
                 return
-        finally:
-            conn.close()
+            previous_last_reply_ts = row[2]
+            if previous_last_reply_ts:
+                try:
+                    stale_or_duplicate = float(ts) <= float(previous_last_reply_ts)
+                except (TypeError, ValueError):
+                    stale_or_duplicate = ts == previous_last_reply_ts
+                if stale_or_duplicate:
+                    logger.info(
+                        "[ENGAGE] Stale or duplicate event %s ignored (last=%s)",
+                        ts,
+                        previous_last_reply_ts,
+                    )
+                    return
 
-        openai_api_key = os.environ.get("OPENAI_API_KEY")
-        if not openai_api_key:
-            logger.warning("[ENGAGE] OPENAI_API_KEY non configurata, skip engaged reply")
-            return
-
-        thread_messages = get_thread_messages(channel, thread_ts)
-        if not thread_messages:
-            return
-
-        client = OpenAI(api_key=openai_api_key)
-        _auto_reply_in_thread(channel, thread_ts, thread_messages, client, say)
-
-        conn, cursor = db_connect(database_path)
-        try:
+            # Claim atomico: eventi Slack duplicati o concorrenti producono una sola risposta.
             cursor.execute(
-                "UPDATE engaged_threads SET last_reply_ts = ? WHERE thread_ts = ? AND channel = ?",
-                (ts, thread_ts, channel),
+                """
+                UPDATE engaged_threads
+                SET last_reply_ts = ?
+                WHERE thread_ts = ? AND channel = ? AND engaged = 1 AND stopped = 0
+                  AND ((last_reply_ts IS NULL AND ? IS NULL) OR last_reply_ts = ?)
+                """,
+                (
+                    ts,
+                    thread_ts,
+                    channel,
+                    previous_last_reply_ts,
+                    previous_last_reply_ts,
+                ),
             )
+            claimed = cursor.rowcount == 1
             conn.commit()
         finally:
             conn.close()
+        if not claimed:
+            logger.info("[ENGAGE] Event %s already claimed by another worker", ts)
+            return
+
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY non configurata")
+
+        thread_messages = get_thread_messages(
+            channel,
+            thread_ts,
+            fallback_to_archive=True,
+            raise_errors=True,
+        )
+        if not thread_messages:
+            raise RuntimeError("thread Slack e fallback archivio non disponibili")
+
+        throttle_conn, throttle_cursor = db_connect(database_path)
+        try:
+            allowed, throttle_message, throttle_info = check_ai_throttle(
+                throttle_conn,
+                throttle_cursor,
+                msg_user,
+                channel,
+            )
+        finally:
+            throttle_conn.close()
+        if not allowed:
+            say(throttle_message, thread_ts=thread_ts)
+            return
+
+        client = OpenAI(api_key=openai_api_key)
+        _auto_reply_in_thread(
+            channel,
+            thread_ts,
+            thread_messages,
+            client,
+            say,
+            response_suffix=format_ai_rate_limit_footer(throttle_info),
+        )
     except Exception as e:
-        logger.error(f"[ENGAGE] Errore engaged reply: {e}")
-        logger.error(traceback.format_exc())
+        # Rilascia il claim solo se nessun evento successivo lo ha già sostituito.
+        if claimed:
+            try:
+                conn, cursor = db_connect(database_path)
+                try:
+                    cursor.execute(
+                        "UPDATE engaged_threads SET last_reply_ts = ? "
+                        "WHERE thread_ts = ? AND channel = ? AND last_reply_ts = ?",
+                        (previous_last_reply_ts, thread_ts, channel, ts),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception:
+                logger.exception("[ENGAGE] Failed to release event claim %s", ts)
+        _report_ai_error(
+            e,
+            event=message,
+            source="engaged_thread",
+            say=say,
+            thread_ts=thread_ts,
+        )
 
 
 def maybe_auto_engage_trash(message, say):
@@ -2399,9 +2651,18 @@ def handle_app_mention_event(event, say):
             links=links,
         ),
     )
-    if _maybe_handle_engage_command(event, say):
-        return
-    handle_app_mention(event, say)
+    try:
+        if _maybe_handle_engage_command(event, say):
+            return
+        handle_app_mention(event, say)
+    except Exception as e:
+        _report_ai_error(
+            e,
+            event=event,
+            source="app_mention_router",
+            say=say,
+            thread_ts=event.get("thread_ts") or event.get("ts"),
+        )
 
 
 @app.event({"type": "message", "subtype": "thread_broadcast"})

@@ -12,7 +12,6 @@ from sferait_context import SFERAIT_SYSTEM_PROMPT
 
 DEFAULT_AI_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "medium"
-CHAT_TOOL_REASONING_EFFORT = "none"
 MAX_SEARCH_ROUNDS = 6
 MAX_TOOL_CALLS = 8
 MAX_OUTPUT_TOKENS = 3000
@@ -36,7 +35,7 @@ _HISTORICAL_QUERY_RE = re.compile(
 
 _FORCE_GREP_TOOL = {
     "type": "function",
-    "function": {"name": "grep_archive"},
+    "name": "grep_archive",
 }
 
 logger = logging.getLogger(__name__)
@@ -45,92 +44,115 @@ logger = logging.getLogger(__name__)
 ARCHIVE_TOOLS = [
     {
         "type": "function",
-        "function": {
-            "name": "grep_archive",
-            "description": (
-                "Cerca testo e metadati in tutti i messaggi archiviati dei canali "
-                "Slack visibili all'utente. Usala più volte con sinonimi, nomi o "
-                "varianti linguistiche quando la prima ricerca non basta."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Termini o frase da cercare.",
-                    },
-                    "match_mode": {
-                        "type": "string",
-                        "enum": ["all", "any", "phrase"],
-                        "description": "all richiede tutti i termini; any almeno uno; phrase la frase esatta.",
-                    },
-                    "channel": {
-                        "type": "string",
-                        "description": "Nome o ID canale, oppure stringa vuota.",
-                    },
-                    "user": {
-                        "type": "string",
-                        "description": "Nome o ID autore, oppure stringa vuota.",
-                    },
-                    "after": {
-                        "type": "string",
-                        "description": "Data ISO minima, oppure stringa vuota.",
-                    },
-                    "before": {
-                        "type": "string",
-                        "description": "Data ISO massima, oppure stringa vuota.",
-                    },
-                    "sort": {
-                        "type": "string",
-                        "enum": ["relevance", "newest", "oldest"],
-                        "description": "Ordine risultati; relevance è il default.",
-                    },
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        "name": "grep_archive",
+        "description": (
+            "Cerca testo e metadati in tutti i messaggi archiviati dei canali "
+            "Slack visibili all'utente. Usala più volte con sinonimi, nomi o "
+            "varianti linguistiche quando la prima ricerca non basta."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Termini o frase da cercare.",
                 },
-                "required": ["query"],
-                "additionalProperties": False,
+                "match_mode": {
+                    "type": "string",
+                    "enum": ["all", "any", "phrase"],
+                    "description": "all richiede tutti i termini; any almeno uno; phrase la frase esatta.",
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "Nome o ID canale, oppure stringa vuota.",
+                },
+                "user": {
+                    "type": "string",
+                    "description": "Nome o ID autore, oppure stringa vuota.",
+                },
+                "after": {
+                    "type": "string",
+                    "description": "Data ISO minima, oppure stringa vuota.",
+                },
+                "before": {
+                    "type": "string",
+                    "description": "Data ISO massima, oppure stringa vuota.",
+                },
+                "sort": {
+                    "type": "string",
+                    "enum": ["relevance", "newest", "oldest"],
+                    "description": "Ordine risultati; relevance è il default.",
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
             },
+            "required": ["query"],
+            "additionalProperties": False,
         },
     },
     {
         "type": "function",
-        "function": {
-            "name": "read_thread",
-            "description": "Legge cronologicamente il thread archiviato di un risultato trovato.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "channel_id": {"type": "string"},
-                    "thread_ts": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-                },
-                "required": ["channel_id", "thread_ts"],
-                "additionalProperties": False,
+        "name": "read_thread",
+        "description": "Legge cronologicamente il thread archiviato di un risultato trovato.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string"},
+                "thread_ts": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
             },
+            "required": ["channel_id", "thread_ts"],
+            "additionalProperties": False,
         },
     },
     {
         "type": "function",
-        "function": {
-            "name": "read_surrounding",
-            "description": (
-                "Legge i messaggi cronologicamente vicini a un risultato, utile per "
-                "conversazioni storiche non raccolte in un thread."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "channel_id": {"type": "string"},
-                    "message_ts": {"type": "string"},
-                    "before": {"type": "integer", "minimum": 0, "maximum": 20},
-                    "after": {"type": "integer", "minimum": 0, "maximum": 20},
-                },
-                "required": ["channel_id", "message_ts"],
-                "additionalProperties": False,
+        "name": "read_surrounding",
+        "description": (
+            "Legge i messaggi cronologicamente vicini a un risultato, utile per "
+            "conversazioni storiche non raccolte in un thread."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "channel_id": {"type": "string"},
+                "message_ts": {"type": "string"},
+                "before": {"type": "integer", "minimum": 0, "maximum": 20},
+                "after": {"type": "integer", "minimum": 0, "maximum": 20},
             },
+            "required": ["channel_id", "message_ts"],
+            "additionalProperties": False,
         },
     },
 ]
+
+
+def generate_text_response(
+    client,
+    *,
+    instructions: str,
+    input_text: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    max_output_tokens: int = MAX_OUTPUT_TOKENS,
+    text_format: dict | None = None,
+) -> str:
+    """Generate one stateless text response through the Responses API."""
+    request = {
+        "model": model or os.getenv("OPENAI_MODEL", DEFAULT_AI_MODEL),
+        "instructions": instructions,
+        "input": input_text,
+        "reasoning": {
+            "effort": reasoning_effort
+            or os.getenv("OPENAI_REASONING_EFFORT", DEFAULT_REASONING_EFFORT)
+        },
+        "max_output_tokens": int(max_output_tokens),
+        "store": False,
+    }
+    if text_format is not None:
+        request["text"] = {"format": text_format}
+    response = client.responses.create(**request)
+    _ensure_response_usable(response)
+    return (getattr(response, "output_text", None) or "").strip()
 
 
 def run_archive_agent(
@@ -148,9 +170,7 @@ def run_archive_agent(
     reasoning_effort = reasoning_effort or os.getenv(
         "OPENAI_REASONING_EFFORT", DEFAULT_REASONING_EFFORT
     )
-    reasoning_effort = chat_tool_reasoning_effort(model, reasoning_effort)
-    messages = [
-        {"role": "system", "content": SFERAIT_SYSTEM_PROMPT},
+    input_items = [
         {
             "role": "user",
             "content": (
@@ -174,22 +194,24 @@ def run_archive_agent(
             if archive_search_required and tool_calls_used == 0 and round_index == 0
             else "auto"
         )
-        response = client.chat.completions.create(
+        response = client.responses.create(
             model=model,
-            messages=messages,
+            instructions=SFERAIT_SYSTEM_PROMPT,
+            input=input_items,
             tools=ARCHIVE_TOOLS,
             tool_choice=tool_choice,
             parallel_tool_calls=False,
-            reasoning_effort=reasoning_effort,
-            max_completion_tokens=MAX_OUTPUT_TOKENS,
+            reasoning={"effort": reasoning_effort},
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+            include=["reasoning.encrypted_content"],
             store=False,
         )
-        assistant = response.choices[0].message
-        messages.append(_message_dump(assistant))
-        tool_calls = list(getattr(assistant, "tool_calls", None) or [])
+        _ensure_response_usable(response)
+        input_items.extend(_response_output_dump(response))
+        tool_calls = _response_function_calls(response)
         if not tool_calls:
             if archive_search_required and tool_calls_used == 0:
-                messages.append(
+                input_items.append(
                     {
                         "role": "user",
                         "content": (
@@ -199,7 +221,7 @@ def run_archive_agent(
                     }
                 )
                 continue
-            answer = (getattr(assistant, "content", None) or "").strip()
+            answer = (getattr(response, "output_text", None) or "").strip()
             return _finalize_answer(
                 answer,
                 search_engine.evidence,
@@ -224,11 +246,11 @@ def run_archive_agent(
                     tool_errors.append(str(output["error"]))
                 else:
                     successful_tool_calls += 1
-            messages.append(
+            input_items.append(
                 {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": json.dumps(output, ensure_ascii=False),
+                    "type": "function_call_output",
+                    "call_id": tool_call.call_id,
+                    "output": json.dumps(output, ensure_ascii=False),
                 }
             )
         if budget_exhausted or tool_calls_used >= MAX_TOOL_CALLS:
@@ -240,7 +262,7 @@ def run_archive_agent(
             "quindi non posso confermare la conversazione richiesta."
         )
 
-    messages.append(
+    input_items.append(
         {
             "role": "user",
             "content": (
@@ -249,17 +271,20 @@ def run_archive_agent(
             ),
         }
     )
-    response = client.chat.completions.create(
+    response = client.responses.create(
         model=model,
-        messages=messages,
+        instructions=SFERAIT_SYSTEM_PROMPT,
+        input=input_items,
         tools=ARCHIVE_TOOLS,
         tool_choice="none",
         parallel_tool_calls=False,
-        reasoning_effort=reasoning_effort,
-        max_completion_tokens=MAX_OUTPUT_TOKENS,
+        reasoning={"effort": reasoning_effort},
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        include=["reasoning.encrypted_content"],
         store=False,
     )
-    answer = (response.choices[0].message.content or "").strip()
+    _ensure_response_usable(response)
+    answer = (getattr(response, "output_text", None) or "").strip()
     return _finalize_answer(
         answer,
         search_engine.evidence,
@@ -336,22 +361,10 @@ def _finalize_answer(
     return render_sources(answer, evidence)
 
 
-def chat_tool_reasoning_effort(model: str, configured_effort: str) -> str:
-    """Return an effort accepted by Chat Completions function tools.
-
-    GPT-5.6 rejects function tools combined with reasoning effort other than
-    ``none`` on ``/v1/chat/completions``. Keep this compatibility shim local to
-    the tool loop; the configured effort remains available to other workloads.
-    """
-    if model.strip().lower().startswith("gpt-5.6"):
-        return CHAT_TOOL_REASONING_EFFORT
-    return configured_effort
-
-
 def _dispatch_tool(search_engine: ArchiveSearchEngine, tool_call) -> dict:
-    name = getattr(tool_call.function, "name", "")
+    name = getattr(tool_call, "name", "")
     try:
-        arguments = json.loads(getattr(tool_call.function, "arguments", "{}") or "{}")
+        arguments = json.loads(getattr(tool_call, "arguments", "{}") or "{}")
     except json.JSONDecodeError:
         return {"error": "argomenti JSON non validi", "count": 0, "results": []}
 
@@ -370,14 +383,32 @@ def _dispatch_tool(search_engine: ArchiveSearchEngine, tool_call) -> dict:
         return {"error": "ricerca archivio non disponibile", "count": 0, "results": []}
 
 
-def _message_dump(message) -> dict:
-    if hasattr(message, "model_dump"):
-        return message.model_dump(exclude_none=True)
-    result = {"role": "assistant", "content": getattr(message, "content", None)}
-    tool_calls = getattr(message, "tool_calls", None)
-    if tool_calls:
-        result["tool_calls"] = [
-            call.model_dump(exclude_none=True) if hasattr(call, "model_dump") else call
-            for call in tool_calls
-        ]
-    return result
+def _response_function_calls(response) -> list:
+    return [
+        item
+        for item in (getattr(response, "output", None) or [])
+        if getattr(item, "type", None) == "function_call"
+    ]
+
+
+def _ensure_response_usable(response) -> None:
+    status = str(getattr(response, "status", "completed") or "completed")
+    if status not in {"failed", "cancelled"}:
+        return
+    error = getattr(response, "error", None)
+    if hasattr(error, "model_dump"):
+        error = error.model_dump(exclude_none=True)
+    raise RuntimeError(f"OpenAI Responses status={status}: {error or 'nessun dettaglio'}")
+
+
+def _response_output_dump(response) -> list[dict]:
+    """Preserve every Responses output item for the next stateless turn."""
+    dumped = []
+    for item in getattr(response, "output", None) or []:
+        if hasattr(item, "model_dump"):
+            dumped.append(item.model_dump(exclude_none=True))
+        elif isinstance(item, dict):
+            dumped.append(dict(item))
+        else:
+            raise TypeError(f"unsupported Responses output item: {type(item).__name__}")
+    return dumped

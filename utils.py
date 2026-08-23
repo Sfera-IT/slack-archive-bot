@@ -457,6 +457,18 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Debug AI privato opt-in. Nessuna riga equivale a debug disabilitato.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_debug_subscribers (
+            user_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0,1)),
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
     # Migrazione: se la colonna timestamp è TEXT, la convertiamo in REAL
     try:
         cursor.execute("PRAGMA table_info(ai_requests)")

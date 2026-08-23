@@ -33,6 +33,7 @@ def build_private_ai_error_report(
     model: str,
     reasoning_effort: str,
     error_id: str,
+    source: str = "ai",
 ) -> str:
     """Build a bounded diagnostic report without secrets, locals, or prompt data."""
     details = _exception_details(exception)
@@ -51,6 +52,8 @@ def build_private_ai_error_report(
         f"• messaggio: `{_slack_escape(details['message'])}`",
         f"• modello: `{_slack_escape(model)}`",
         f"• reasoning: `{_slack_escape(reasoning_effort)}`",
+        f"• flusso: `{_slack_escape(source)}`",
+        f"• utente: `{_slack_escape(str(event.get('user') or 'n/d'))}`",
         f"• canale: `{_slack_escape(str(event.get('channel') or 'n/d'))}`",
         f"• messaggio: `{_slack_escape(str(event.get('ts') or 'n/d'))}`",
     ]
@@ -74,9 +77,11 @@ def send_private_ai_error(
     model: str,
     reasoning_effort: str,
     error_id: str,
+    recipient_user_id: str | None = None,
+    source: str = "ai",
 ) -> None:
-    """Send the sanitized report to the requesting user's Slack DM."""
-    user_id = str(event.get("user") or "")
+    """Send the sanitized report to one explicitly selected Slack DM."""
+    user_id = str(recipient_user_id or event.get("user") or "")
     if not user_id:
         raise ValueError("missing requesting Slack user ID")
     client.chat_postMessage(
@@ -87,8 +92,39 @@ def send_private_ai_error(
             model=model,
             reasoning_effort=reasoning_effort,
             error_id=error_id,
+            source=source,
         ),
     )
+
+
+def set_ai_debug_enabled(cursor, user_id: str, enabled: bool) -> None:
+    """Persist an administrator's opt-in state; missing rows mean disabled."""
+    cursor.execute(
+        """
+        INSERT INTO ai_debug_subscribers(user_id, enabled, updated_at)
+        VALUES (?, ?, strftime('%s', 'now'))
+        ON CONFLICT(user_id) DO UPDATE SET
+            enabled = excluded.enabled,
+            updated_at = excluded.updated_at
+        """,
+        (str(user_id), 1 if enabled else 0),
+    )
+
+
+def is_ai_debug_enabled(cursor, user_id: str) -> bool:
+    cursor.execute(
+        "SELECT enabled FROM ai_debug_subscribers WHERE user_id = ?",
+        (str(user_id),),
+    )
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
+def get_ai_debug_recipients(cursor) -> list[str]:
+    cursor.execute(
+        "SELECT user_id FROM ai_debug_subscribers WHERE enabled = 1 ORDER BY user_id"
+    )
+    return [str(row[0]) for row in cursor.fetchall()]
 
 
 def _exception_details(exception: Exception) -> dict[str, str]:

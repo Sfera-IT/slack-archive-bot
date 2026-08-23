@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import sys
 from typing import ClassVar
 
@@ -8,9 +9,13 @@ if ROOT_DIR not in sys.path:
 
 from ai_diagnostics import (
     build_private_ai_error_report,
+    get_ai_debug_recipients,
+    is_ai_debug_enabled,
     new_ai_error_id,
     send_private_ai_error,
+    set_ai_debug_enabled,
 )
+from utils import migrate_db
 
 
 class ApiFailure(RuntimeError):
@@ -37,10 +42,11 @@ def test_private_error_report_contains_actionable_metadata_and_no_secrets():
     except ApiFailure as exception:
         report = build_private_ai_error_report(
             exception,
-            event={"channel": "C123", "ts": "1700000000.1"},
+            event={"user": "UTRIGGER", "channel": "C123", "ts": "1700000000.1"},
             model="gpt-5.6-sol",
             reasoning_effort="medium",
             error_id="AI-ABC123",
+            source="engaged_thread",
         )
 
     assert "AI-ABC123" in report
@@ -50,6 +56,8 @@ def test_private_error_report_contains_actionable_metadata_and_no_secrets():
     assert "param: `tools`" in report
     assert "request_id: `req_123`" in report
     assert "gpt-5.6-sol" in report
+    assert "engaged_thread" in report
+    assert "UTRIGGER" in report
     assert "test_ai_diagnostics.py" in report
     assert "sk-test-secret123" not in report
     assert "xoxb-secret123" not in report
@@ -96,8 +104,30 @@ def test_private_error_is_sent_to_the_requesting_users_dm():
         model="gpt-5.6-sol",
         reasoning_effort="medium",
         error_id="AI-ABC123",
+        recipient_user_id="UADMIN",
+        source="app_mention",
     )
 
     assert len(client.calls) == 1
-    assert client.calls[0]["channel"] == "UREQUESTER"
+    assert client.calls[0]["channel"] == "UADMIN"
     assert "AI-ABC123" in client.calls[0]["text"]
+
+
+def test_ai_debug_subscription_is_disabled_by_default_and_can_be_toggled():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    migrate_db(conn, cursor)
+
+    assert not is_ai_debug_enabled(cursor, "UADMIN")
+    assert get_ai_debug_recipients(cursor) == []
+
+    set_ai_debug_enabled(cursor, "UADMIN", True)
+    conn.commit()
+    assert is_ai_debug_enabled(cursor, "UADMIN")
+    assert get_ai_debug_recipients(cursor) == ["UADMIN"]
+
+    set_ai_debug_enabled(cursor, "UADMIN", False)
+    conn.commit()
+    assert not is_ai_debug_enabled(cursor, "UADMIN")
+    assert get_ai_debug_recipients(cursor) == []
+    conn.close()
