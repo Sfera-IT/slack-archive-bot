@@ -56,4 +56,4 @@ ENV ARCHIVE_BOT_LOG_LEVEL=$LOG_LEVEL
 
 EXPOSE $PORT
 
-CMD exec uv run --frozen --no-dev --no-sync gunicorn flask_app:flask_app -c gunicorn_conf.py
+CMD ["uv", "run", "--frozen", "--no-dev", "--no-sync", "gunicorn", "flask_app:flask_app", "-c", "gunicorn_conf.py"]

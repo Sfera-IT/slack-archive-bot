@@ -160,7 +160,39 @@ to the query.  The full usage is:
 ## AI thread engagement
 
 Mentioning the bot normally keeps the default one-shot behavior: it replies once
-using the current thread or channel context.
+using the current thread or channel context. Historical questions now run a
+bounded agentic search over the complete archived history visible to the
+requesting user. Questions with explicit historical intent force an initial
+archive grep, so the model cannot answer them from plausible-sounding memory.
+The agent can then iteratively:
+
+- grep messages and metadata across all visible channels;
+- refine searches with names, synonyms, dates, and channel filters;
+- sort by relevance, newest, or oldest results;
+- open a matching thread or inspect surrounding messages;
+- cite archived Slack messages with their permalinks.
+
+The retrieval path deliberately does not depend on the legacy message embeddings.
+Messages removed from the archive or excluded through archive/AI opt-out are never
+returned. Public channels are searchable workspace-wide; private-channel results
+are available only to members (the current private channel is also allowed because
+the request itself proves access).
+
+AI answers use `gpt-5.6-sol` by default and the OpenAI Responses-capable SDK. The
+runtime currently uses bounded Chat Completions function calls for compatibility
+with the existing bot lifecycle. Configure it with:
+
+- `OPENAI_MODEL` — answer and retrieval model; default `gpt-5.6-sol`.
+- `OPENAI_REASONING_EFFORT` — `none`, `low`, `medium`, `high`, `xhigh`, or `max`;
+  default `medium`.
+- `OPENAI_DECISION_MODEL` — optional override for legacy engage/clown decisions;
+  defaults to `OPENAI_MODEL`.
+
+The response policy is evidence-first and intentionally sober: no automatic
+sarcasm, recurring inside jokes, or claims of remembering a conversation that was
+not found. When the archive does not provide enough evidence, the bot says so.
+Current channel/thread context is size-bounded and keeps the most recent messages,
+so a long conversation cannot crowd retrieval evidence out of the model window.
 
 To keep the bot engaged in a thread, mention it with:
 
