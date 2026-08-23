@@ -1,4 +1,6 @@
 import datetime
+import hashlib
+import hmac
 import importlib
 import os
 import sqlite3
@@ -205,6 +207,24 @@ def test_oauth_state_is_one_time_and_jwt_contains_no_slack_token(
     assert len(calls) == 1
 
 
+def test_oauth_state_is_persisted_as_keyed_digest(web_module):
+    module = web_module
+    state = "high-entropy-oauth-state"
+    module._store_oauth_state(state, "/")
+
+    conn = sqlite3.connect(os.environ["DB_PATH"])
+    stored = conn.execute("SELECT state_hash FROM oauth_states").fetchone()[0]
+    conn.close()
+
+    expected = hmac.new(
+        str(module.flask_app.secret_key).encode("utf-8"),
+        state.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    assert stored == expected
+    assert stored != hashlib.sha256(state.encode("utf-8")).hexdigest()
+
+
 def test_oauth_rejects_unexpected_workspace_and_external_return_to(
     web_module, monkeypatch
 ):
@@ -399,6 +419,24 @@ def test_runtime_configuration_fails_fast_on_weak_secrets(web_module, monkeypatc
     monkeypatch.setattr(module.flask_app, "secret_key", "too-short")
     with pytest.raises(RuntimeError, match="SECRET_KEY"):
         module._validate_runtime_configuration()
+
+
+def test_validation_exceptions_are_not_exposed(web_module, monkeypatch):
+    module = web_module
+    monkeypatch.setattr(
+        module,
+        "_validated_context_refs",
+        lambda _value: (_ for _ in ()).throw(ValueError("sensitive internal detail")),
+    )
+    response = module.flask_app.test_client().post(
+        "/chat",
+        headers=_auth_headers(module, "U2"),
+        json={"message": "summarize", "context_refs": []},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Invalid chat context"}
+    assert "sensitive internal detail" not in response.get_data(as_text=True)
 
 
 def test_runtime_configuration_requires_https_for_oauth(web_module, monkeypatch):

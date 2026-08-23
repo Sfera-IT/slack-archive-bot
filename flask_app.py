@@ -314,7 +314,14 @@ def get_db_connection():
 
 
 def _oauth_state_digest(state):
-    return hashlib.sha256(state.encode('utf-8')).hexdigest()
+    # OAuth state values are high-entropy nonces, not passwords. Key the
+    # persisted digest as defense in depth so a leaked state table cannot be
+    # used to validate captured values without the application secret.
+    return hmac.new(
+        str(flask_app.secret_key).encode('utf-8'),
+        state.encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _store_oauth_state(state, return_to):
@@ -1051,8 +1058,8 @@ def search_messages_V2():
         end_timestamp = _parse_iso_timestamp(
             _bounded_query_arg('end_time', maximum=64), 'end_time'
         )
-    except ValueError as exception:
-        return get_response({'error': str(exception)}), 400
+    except ValueError:
+        return get_response({'error': 'Invalid search parameters'}), 400
 
     conn = get_db_connection()
     try:
@@ -1129,8 +1136,8 @@ def search_messages_embeddings():
         end_timestamp = _parse_iso_timestamp(
             _bounded_query_arg('end_time', maximum=64), 'end_time'
         )
-    except ValueError as exception:
-        return get_response({'error': str(exception)}), 400
+    except ValueError:
+        return get_response({'error': 'Invalid search parameters'}), 400
     if not query.strip():
         return get_response({'error': 'No query provided'}), 400
 
@@ -1661,8 +1668,8 @@ def chat():
         conversation = _validated_chat_items(
             data.get('conversation', []), 'conversation'
         )
-    except ValueError as exception:
-        return jsonify({'error': str(exception)}), 400
+    except ValueError:
+        return jsonify({'error': 'Invalid chat context'}), 400
 
     context = _load_ai_context_from_refs(context_refs, g.user_id)
 
