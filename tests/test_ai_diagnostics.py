@@ -117,32 +117,17 @@ def test_ai_debug_subscription_is_disabled_by_default_and_can_be_toggled():
     conn = sqlite3.connect(":memory:")
     cursor = conn.cursor()
     migrate_db(conn, cursor)
-    admin_user = "U011PQ7RHRT"
 
-    assert not is_ai_debug_enabled(cursor, admin_user)
+    assert not is_ai_debug_enabled(cursor, "UADMIN")
     assert get_ai_debug_recipients(cursor) == []
 
-    set_ai_debug_enabled(cursor, admin_user, True)
+    set_ai_debug_enabled(cursor, "UADMIN", True)
     conn.commit()
-    assert is_ai_debug_enabled(cursor, admin_user)
-    assert get_ai_debug_recipients(cursor) == [admin_user]
+    assert is_ai_debug_enabled(cursor, "UADMIN")
+    assert get_ai_debug_recipients(cursor) == ["UADMIN"]
 
-    set_ai_debug_enabled(cursor, admin_user, False)
+    set_ai_debug_enabled(cursor, "UADMIN", False)
     conn.commit()
-    assert not is_ai_debug_enabled(cursor, admin_user)
+    assert not is_ai_debug_enabled(cursor, "UADMIN")
     assert get_ai_debug_recipients(cursor) == []
-    conn.close()
-
-
-def test_ai_debug_recipients_always_exclude_non_admin_subscribers():
-    conn = sqlite3.connect(":memory:")
-    cursor = conn.cursor()
-    migrate_db(conn, cursor)
-    set_ai_debug_enabled(cursor, "UNOTADMIN", True)
-    set_ai_debug_enabled(cursor, "U011PQ7RHRT", True)
-    conn.commit()
-
-    assert get_ai_debug_recipients(cursor) == ["U011PQ7RHRT"]
-    assert get_ai_debug_recipients(cursor, admin_users={"UNOTADMIN"}) == []
-    assert get_ai_debug_recipients(cursor, admin_users=set()) == []
     conn.close()

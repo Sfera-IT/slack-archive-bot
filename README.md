@@ -16,13 +16,6 @@ further back than 10,000 messages.
 
         uv sync
 
-   Copy `.env.example` to `.env` and replace every placeholder. Invalid runtime
-   configuration is logged by field name (never by value): `/healthz` stays
-   available in degraded mode, `/readyz` stays unavailable, and OAuth/JWT routes
-   return 503 until the configuration is corrected. This keeps Slack event
-   handling and diagnostics observable during a bad rollout without weakening
-   authentication.
-
 3. If you want to include your existing slack messages, [export your team's slack history.](https://get.slack.help/hc/en-us/articles/201658943-Export-your-team-s-Slack-history)
 Download the archive and export it to a directory. Then run `import.py`
 on the directory.  For example:
@@ -42,7 +35,6 @@ on the directory.  For example:
   - `groups:history` (if you want to archive/search private channels)
   - `groups:read` (if you want to archive/search private channels)
   - `im:history`
-  - `emoji:read`
   - `users:read`
 
 5. Start slack-archive-bot with:
@@ -58,7 +50,6 @@ Use `uv run python archivebot.py -h` for a list of all command line options.
 
 - Then add the following bot events:
 
-  - `app_mention`
   - `channel_created`
   - `channel_rename`
   - `group_rename` (if you want to archive/search private channels)
@@ -77,11 +68,10 @@ Build the latest docker image with:
 docker build --build-arg PORT=3333 . -t archivebot:latest
 ```
 
-Run the built image using the same required variables documented in
-`.env.example`:
+Run the built image using:
 
 ```shell
-docker run --env-file .env -v /local/data/path/:/data/ archivebot:latest
+docker run -e SLACK_BOT_TOKEN=<BOT_TOKEN> -e SLACK_SIGNING_SECRET=<SIGNING_SECRET> -v /local/data/path/:/data/ archivebot:latest
 ```
 
 ## Deploying Production Server Using WSGI
@@ -92,11 +82,7 @@ Flask and Gunicorn to deploy slack-archive-bot, but it should work equally well 
 1. `SLACK_BOT_TOKEN=<BOT_TOKEN> SLACK_SIGNING_SECRET=<SIGNING_SECRET> uv run gunicorn flask_app:flask_app -c gunicorn_conf.py <other gunicorn args>`
 2. `flask_app.py` provides a thin wrapper around `archivebot.app` using `slack_bolt.adapter.flask.SlackRequestHandler`. There are many other adapters provided by bolt. To use them, simply `from archivebot import app` and wrap `app`.
 3. `gunicorn_conf.py` ensures that the local database is updated when the server is started, but that it's not run for each worker.
-4. You can use `ARCHIVE_BOT_LOG_LEVEL` and `ARCHIVE_BOT_DATABASE_PATH` to configure slack-archive-bot while running it via gunicorn. `DB_PATH` is a compatibility alias; when both are set they must identify the same SQLite file.
-5. `/healthz` checks process/database liveness and exposes the non-secret version
-   and revision. `/readyz` also requires the Slack bot identity to have been
-   resolved. `SLACK_BOT_USER_ID` can be configured as a validated operational
-   fallback; otherwise identity resolution is retried on incoming events.
+4. You can use `ARCHIVE_BOT_LOG_LEVEL` and `ARCHIVE_BOT_DATABASE_PATH` to configure slack-archive-bot while running it via gunicorn. 
 
 ## Archiving New Messages
 
@@ -184,20 +170,13 @@ The agent can then iteratively:
 - refine searches with names, synonyms, dates, and channel filters;
 - sort by relevance, newest, or oldest results;
 - open a matching thread or inspect surrounding messages;
-- cite archived messages with both the Slack permalink and a durable
-  SferaArchive deep link.
+- cite archived Slack messages with their permalinks.
 
 The retrieval path deliberately does not depend on the legacy message embeddings.
 Messages removed from the archive or excluded through archive/AI opt-out are never
-returned. Public channels are searchable workspace-wide. A response posted on a
-shared Slack surface may additionally use the current channel, but never content
-from a different private channel. This prevents a requester's broader membership
-from disclosing private material to other thread participants.
-
-Each cited source includes a direct Slack link and a credential-free SferaArchive
-URL containing validated `channel`, `thread_ts`, and `message_ts` parameters. Set
-`SFERAARCHIVE_FRONTEND_URL` to override the frontend base URL; otherwise
-`CLIENT_URL` and then `https://sferaarchive-client.vercel.app/` are used.
+returned. Public channels are searchable workspace-wide; private-channel results
+are available only to members (the current private channel is also allowed because
+the request itself proves access).
 
 AI answers use `gpt-5.6-sol` and the OpenAI Responses API by default. The bounded
 agent preserves every response output item between stateless tool turns, including
@@ -209,12 +188,6 @@ Configure it with:
   default `medium`.
 - `OPENAI_DECISION_MODEL` — optional override for legacy engage/clown decisions;
   defaults to `OPENAI_MODEL`.
-- `ARCHIVE_AGENT_ENABLED` — emergency kill switch for archive tools; when false,
-  one-shot mentions use only bounded current context and explicitly avoid claims
-  not supported by that context.
-- `THREAD_ENGAGEMENT_ENABLED` — emergency kill switch for `/engage` and existing
-  automatic thread replies. Use these two switches for a security-preserving
-  rollback; do not redeploy v2.1.1, whose auth/privacy contract is incompatible.
 
 The Responses API allows GPT-5.6 reasoning and archive function tools in the same
 request. The configured reasoning effort therefore applies to the complete search
@@ -257,40 +230,6 @@ Reports include a correlation ID,
 the failing flow (including engaged threads), API metadata, and a bounded stack
 without prompt contents, local variables, tokens, or credentials. Public channels
 only receive the correlation ID.
-
-## v2.2 production rollout and safe rollback
-
-Before switching the backend image, verify the production environment without
-printing values: `SECRET_KEY` (at least 32 characters), `CLIENT_ID`,
-`CLIENT_SECRET`, `OAUTH_SCOPE`, `EXPECTED_TEAM_ID`, `SLACK_BOT_TOKEN`, and
-`SLACK_SIGNING_SECRET`. Custom Slack emoji require `emoji:read` on the installed
-bot token; without it `/emoji` deliberately returns an empty degraded result so
-standard emoji and the rest of the UI keep working. Apply a reverse-proxy rate limit to `/login`; OAuth state is
-one-time and bounded, but each valid login start intentionally writes to SQLite.
-The official SferaIT container pins the verified non-secret workspace ID
-`T011MV24J1Y` as its default; non-Sfera deployments must override it.
-
-The v2.1.1 backend put the GUI OAuth app's top-level bot token inside a browser
-JWT and URL query. Use this staged order to avoid a login loop:
-
-1. deploy the frontend tag `v0.2.0-transition.1`, which accepts the signed legacy
-   claim shape only long enough to remove it from the URL and cross the rollout;
-2. deploy backend `v2.2.1` and wait for `/healthz` plus `/readyz` to report the
-   expected revision;
-3. deploy strict frontend `v0.2.0`, which rejects any JWT containing the legacy
-   token claim;
-4. revoke/reinstall the affected GUI OAuth installation token, update the runtime
-   token only if it is confirmed to be the same app/token, rotate `SECRET_KEY` to
-   invalidate old sessions, and remove token-bearing historical URL/access logs
-   where feasible.
-
-Never roll the backend directly back to v2.1.1: it is incompatible with the new
-auth contract and reintroduces the token/privacy defects. For an AI regression,
-keep the v2.2 image and set `ARCHIVE_AGENT_ENABLED=false` and
-`THREAD_ENGAGEMENT_ENABLED=false`; one-shot replies then use current context only
-and automatic thread replies stop. The transitional frontend tag is the safe UI
-rollback because it also accepts final v2.2 fragment tokens. Privacy scrubbing is
-intentionally irreversible and rollback must never restore opted-out content.
 
 
 ## Migrating from slack-archive-bot v0.1

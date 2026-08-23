@@ -12,19 +12,6 @@ MAX_ERROR_MESSAGE_CHARS = 1200
 MAX_STACK_FRAMES = 8
 MAX_REPORT_CHARS = 3600
 
-# Keep the delivery boundary fail-closed even if a stale/non-admin subscriber row
-# is present in the database. This mirrors the bot's administrator allowlist.
-DEFAULT_AI_DEBUG_ADMIN_USERS = frozenset({
-    'U011PQ7RHRT',
-    'U011MV24J2W',
-    'U0129HFHRJ4',
-    'U011N8WRRD0',
-    'U011Z26G449',
-    'U011CKQ7D71',
-    'U011KE4BF0W',
-    'U011PN35BHT',
-})
-
 _TOKEN_PATTERN = re.compile(r"\b(?:sk|xox[baprs])-[A-Za-z0-9._-]{8,}\b", re.IGNORECASE)
 _BEARER_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]+", re.IGNORECASE)
 _NAMED_SECRET_PATTERN = re.compile(
@@ -133,20 +120,9 @@ def is_ai_debug_enabled(cursor, user_id: str) -> bool:
     return bool(row and row[0])
 
 
-def get_ai_debug_recipients(cursor, admin_users=None) -> list[str]:
-    allowed = DEFAULT_AI_DEBUG_ADMIN_USERS
-    if admin_users is not None:
-        allowed = allowed.intersection(str(user_id) for user_id in admin_users)
-    if not allowed:
-        return []
-    padded_allowed = tuple(sorted(allowed)) + ('',) * (
-        len(DEFAULT_AI_DEBUG_ADMIN_USERS) - len(allowed)
-    )
+def get_ai_debug_recipients(cursor) -> list[str]:
     cursor.execute(
-        """SELECT user_id FROM ai_debug_subscribers
-            WHERE enabled = 1 AND user_id IN (?, ?, ?, ?, ?, ?, ?, ?)
-            ORDER BY user_id""",
-        padded_allowed,
+        "SELECT user_id FROM ai_debug_subscribers WHERE enabled = 1 ORDER BY user_id"
     )
     return [str(row[0]) for row in cursor.fetchall()]
 

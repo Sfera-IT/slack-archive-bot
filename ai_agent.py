@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-from urllib.parse import urlsplit
 
 from archive_search import ArchiveSearchEngine, EvidenceRegistry
 from sferait_context import SFERAIT_SYSTEM_PROMPT
@@ -40,25 +39,6 @@ _FORCE_GREP_TOOL = {
 }
 
 logger = logging.getLogger(__name__)
-
-
-def _slack_mrkdwn_escape(value: object) -> str:
-    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _safe_slack_permalink(value: object) -> str:
-    url = str(value or "")
-    parsed = urlsplit(url)
-    hostname = (parsed.hostname or "").lower()
-    if (
-        parsed.scheme != "https"
-        or parsed.username
-        or parsed.password
-        or not hostname
-        or (hostname != "slack.com" and not hostname.endswith(".slack.com"))
-    ):
-        return ""
-    return url
 
 
 ARCHIVE_TOOLS = [
@@ -317,7 +297,7 @@ def run_archive_agent(
 def render_sources(
     answer: str, evidence: EvidenceRegistry, *, fallback_limit: int = 5
 ) -> str:
-    """Append verifiable Slack and durable SferaArchive links for evidence."""
+    """Append verifiable Slack permalinks for evidence IDs used by the model."""
     answer = (answer or "Non sono riuscito a produrre una risposta affidabile.").strip()
     answer = re.sub(
         r"\[(S\d+)\]",
@@ -344,19 +324,12 @@ def render_sources(
         if hit is None:
             continue
         label = (
-            f"[{source_id}] #{_slack_mrkdwn_escape(hit.channel_name)} · "
-            f"{_slack_mrkdwn_escape(hit.user_name)} · "
-            f"{_slack_mrkdwn_escape(hit.date_label)}"
+            f"[{source_id}] #{hit.channel_name} · {hit.user_name} · {hit.date_label}"
         )
-        links = []
-        if slack_permalink := _safe_slack_permalink(hit.permalink):
-            links.append(f"<{slack_permalink}|Slack>")
-        if hit.archive_url:
-            links.append(f"<{hit.archive_url}|SferaArchive>")
-        if links:
-            source_lines.append(f"• {label} — " + " · ".join(links))
+        if hit.permalink:
+            source_lines.append(f"• <{hit.permalink}|{label}>")
         else:
-            source_lines.append(f"• {label} _(link non disponibile)_")
+            source_lines.append(f"• {label} _(permalink non disponibile)_")
 
     if not source_lines:
         return answer
@@ -420,13 +393,9 @@ def _response_function_calls(response) -> list:
 
 def _ensure_response_usable(response) -> None:
     status = str(getattr(response, "status", "completed") or "completed")
-    if status == "completed":
+    if status not in {"failed", "cancelled"}:
         return
-    error = (
-        getattr(response, "incomplete_details", None)
-        if status == "incomplete"
-        else getattr(response, "error", None)
-    )
+    error = getattr(response, "error", None)
     if hasattr(error, "model_dump"):
         error = error.model_dump(exclude_none=True)
     raise RuntimeError(f"OpenAI Responses status={status}: {error or 'nessun dettaglio'}")

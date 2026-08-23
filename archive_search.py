@@ -7,12 +7,10 @@ never bypass channel visibility or AI opt-out rules enforced here.
 
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
-from urllib.parse import urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 ROME = ZoneInfo("Europe/Rome")
@@ -20,56 +18,6 @@ MAX_QUERY_CHARS = 240
 MAX_RESULTS = 20
 MAX_MESSAGE_CHARS = 700
 OPTED_OUT_TEXT = "User opted out of archiving. This message has been deleted"
-DEFAULT_ARCHIVE_FRONTEND_URL = "https://sferaarchive-client.vercel.app/"
-_SLACK_CHANNEL_ID_RE = re.compile(r"^[A-Z][A-Z0-9]{8,}$")
-_SLACK_TIMESTAMP_RE = re.compile(r"^\d{10,16}\.\d{1,6}$")
-
-
-def is_valid_slack_timestamp(value: object) -> bool:
-    """Return whether *value* is a canonical Slack message timestamp."""
-    return _SLACK_TIMESTAMP_RE.fullmatch(str(value or "")) is not None
-
-
-def build_archive_url(
-    channel_id: str,
-    thread_ts: str,
-    message_ts: str,
-    *,
-    base_url: str | None = None,
-) -> str:
-    """Build a credential-free SferaArchive deep link from validated Slack IDs."""
-    channel_id = str(channel_id or "")
-    thread_ts = str(thread_ts or "")
-    message_ts = str(message_ts or "")
-    if not _SLACK_CHANNEL_ID_RE.fullmatch(channel_id):
-        return ""
-    if not is_valid_slack_timestamp(thread_ts):
-        return ""
-    if not is_valid_slack_timestamp(message_ts):
-        return ""
-
-    configured_base = (
-        base_url
-        or os.getenv("SFERAARCHIVE_FRONTEND_URL")
-        or os.getenv("CLIENT_URL")
-        or DEFAULT_ARCHIVE_FRONTEND_URL
-    ).strip()
-    parsed = urlsplit(configured_base)
-    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
-        return ""
-    if parsed.username or parsed.password:
-        return ""
-
-    clean_base = urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path or "/", "", "")
-    )
-    return clean_base + "?" + urlencode(
-        {
-            "channel": channel_id,
-            "thread_ts": thread_ts,
-            "message_ts": message_ts,
-        }
-    )
 
 
 @dataclass(frozen=True)
@@ -92,10 +40,6 @@ class ArchiveHit:
             )
         except (TypeError, ValueError, OSError):
             return "data sconosciuta"
-
-    @property
-    def archive_url(self) -> str:
-        return build_archive_url(self.channel_id, self.thread_ts, self.timestamp)
 
 
 class EvidenceRegistry:
@@ -136,7 +80,6 @@ class EvidenceRegistry:
                     "thread_ts": hit.thread_ts,
                     "message_ts": hit.timestamp,
                     "permalink": hit.permalink,
-                    "archive_url": hit.archive_url,
                 }
             )
         return {"count": len(results), "results": results}
@@ -152,14 +95,12 @@ class ArchiveSearchEngine:
         requester_user_id: str,
         current_channel_id: str = "",
         before_timestamp: str | None = None,
-        allow_member_private_channels: bool = False,
         evidence: EvidenceRegistry | None = None,
     ):
         self.conn = conn
         self.requester_user_id = requester_user_id or ""
         self.current_channel_id = current_channel_id or ""
         self.before_timestamp = before_timestamp
-        self.allow_member_private_channels = bool(allow_member_private_channels)
         self.evidence = evidence or EvidenceRegistry()
 
     def grep_archive(
@@ -234,9 +175,7 @@ class ArchiveSearchEngine:
         payload["match_mode"] = mode
         payload["sort"] = sort_mode
         payload["searched_scope"] = (
-            "tutti i canali visibili all'utente e tutti i messaggi archiviati"
-            if self.allow_member_private_channels
-            else "tutti i canali pubblici e il canale corrente"
+            "tutti i canali visibili e tutti i messaggi archiviati"
         )
         return payload
 
@@ -305,20 +244,17 @@ class ArchiveSearchEngine:
             "m.message != ?",
             "NOT EXISTS (SELECT 1 FROM optout o WHERE o.user = m.user)",
             "NOT EXISTS (SELECT 1 FROM optout_ai oa WHERE oa.user = m.user)",
-        ]
-        params: list = [OPTED_OUT_TEXT]
-        if self.allow_member_private_channels:
-            where.append(
+            (
                 "(c.is_private = 0 OR m.channel = ? OR EXISTS ("
                 "SELECT 1 FROM members visibility "
                 "WHERE visibility.channel = m.channel AND visibility.user = ?))"
-            )
-            params.extend([self.current_channel_id, self.requester_user_id])
-        else:
-            # Responses posted in a shared Slack surface must never disclose a
-            # different private channel merely because the requester can see it.
-            where.append("(c.is_private = 0 OR m.channel = ?)")
-            params.append(self.current_channel_id)
+            ),
+        ]
+        params: list = [
+            OPTED_OUT_TEXT,
+            self.current_channel_id,
+            self.requester_user_id,
+        ]
         if self.before_timestamp:
             where.append("CAST(m.timestamp AS REAL) < ?")
             params.append(_numeric_ts(self.before_timestamp))
@@ -326,8 +262,6 @@ class ArchiveSearchEngine:
 
     @staticmethod
     def _select_sql(where: list[str]) -> str:
-        # `where` contains only fixed fragments assembled by this module. Every
-        # untrusted value is still passed separately as a SQLite parameter.
         return (
             "SELECT m.message, m.user, "
             "COALESCE(NULLIF(u.display_name, ''), NULLIF(u.name, ''), "
@@ -337,7 +271,7 @@ class ArchiveSearchEngine:
             "FROM messages m "
             "INNER JOIN channels c ON c.id = m.channel "
             "LEFT JOIN users u ON u.id = m.user "
-            "WHERE " + " AND ".join(where)  # nosec B608
+            "WHERE " + " AND ".join(where)
         )
 
     @staticmethod
