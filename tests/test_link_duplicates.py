@@ -134,6 +134,15 @@ def test_extract_external_links_is_link_only_unique_and_excludes_slack():
     assert extract_external_links("Only prose about a migration", lambda url: url) == []
 
 
+def test_extract_external_links_caps_work_per_message():
+    text = " ".join(f"https://example.com/{index}" for index in range(25))
+
+    links = extract_external_links(text, lambda value: value)
+
+    assert len(links) == 10
+    assert links[-1].normalized_url == "https://example.com/9"
+
+
 @pytest.mark.parametrize(
     ("text", "thread_ts"),
     [

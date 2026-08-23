@@ -6,7 +6,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from archive_search import ArchiveSearchEngine, EvidenceRegistry
+from archive_search import ArchiveSearchEngine, EvidenceRegistry, build_archive_url
 from utils import migrate_db
 
 
@@ -113,7 +113,17 @@ def test_private_channels_are_visible_only_to_members_or_in_current_channel():
     )
     conn.commit()
 
-    member_engine = ArchiveSearchEngine(conn, requester_user_id="UREQUEST")
+    shared_surface_engine = ArchiveSearchEngine(conn, requester_user_id="UREQUEST")
+    shared = shared_surface_engine.grep_archive(
+        "progetto fenice", match_mode="all", limit=20
+    )
+    assert shared["results"] == []
+
+    member_engine = ArchiveSearchEngine(
+        conn,
+        requester_user_id="UREQUEST",
+        allow_member_private_channels=True,
+    )
     visible = member_engine.grep_archive("progetto fenice", match_mode="all", limit=20)
     assert [result["channel_id"] for result in visible["results"]] == ["CPRIVATE"]
     assert member_engine.read_thread("CHIDDEN", "1600000001.1")["results"] == []
@@ -125,6 +135,24 @@ def test_private_channels_are_visible_only_to_members_or_in_current_channel():
     )
     current = current_channel_engine.grep_archive("progetto fenice", match_mode="all")
     assert [result["channel_id"] for result in current["results"]] == ["CHIDDEN"]
+
+
+def test_archive_url_contains_only_validated_ids_and_timestamps():
+    url = build_archive_url(
+        "C0BSUCGHU8G",
+        "1787395457.104349",
+        "1787495524.036239",
+        base_url="https://sferaarchive-client.vercel.app/?token=secret#fragment",
+    )
+
+    assert url == (
+        "https://sferaarchive-client.vercel.app/"
+        "?channel=C0BSUCGHU8G&thread_ts=1787395457.104349"
+        "&message_ts=1787495524.036239"
+    )
+    assert "token" not in url
+    assert build_archive_url("../bad", "1787395457.104349", "1787495524.036239") == ""
+    assert build_archive_url("C0BSUCGHU8G", "not-a-ts", "1787495524.036239") == ""
 
 
 def test_search_excludes_archive_and_ai_opt_out_content():

@@ -1,5 +1,7 @@
 import sqlite3
 
+from privacy import scrub_legacy_optout_artifacts
+
 
 def migrate_db(conn, cursor):
     cursor.execute(
@@ -41,6 +43,21 @@ def migrate_db(conn, cursor):
             FOREIGN KEY (user) REFERENCES users(id)
         )
     """
+    )
+    cursor.execute(
+        '''
+        DELETE FROM members
+        WHERE rowid NOT IN (
+            SELECT MIN(rowid) FROM members GROUP BY channel, user
+        )
+        '''
+    )
+    cursor.execute('DROP INDEX IF EXISTS idx_members_channel_user')
+    cursor.execute(
+        '''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_members_channel_user
+        ON members(channel, user)
+        '''
     )
     conn.commit()
 
@@ -736,7 +753,9 @@ def migrate_db(conn, cursor):
         ON link_match_scans(claim_token, claimed_at, created_at)
         """
     )
+    scrubbed_legacy_optouts = scrub_legacy_optout_artifacts(conn)
     conn.commit()
+    return scrubbed_legacy_optouts
 
 
 
