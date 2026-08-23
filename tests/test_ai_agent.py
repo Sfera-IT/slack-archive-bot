@@ -18,7 +18,7 @@ from ai_agent import (
     requires_archive_search,
     run_archive_agent,
 )
-from archive_search import ArchiveSearchEngine
+from archive_search import ArchiveHit, ArchiveSearchEngine, EvidenceRegistry
 from utils import migrate_db
 
 
@@ -134,6 +134,26 @@ def test_failed_responses_are_raised_for_the_debug_pipeline():
         )
 
 
+def test_incomplete_responses_are_raised_for_the_debug_pipeline():
+    incomplete = FakeResponse(content="partial")
+    incomplete.status = "incomplete"
+    incomplete.incomplete_details = {"reason": "max_output_tokens"}
+    client = SimpleNamespace(responses=FakeResponses([incomplete]))
+
+    with pytest.raises(RuntimeError, match="status=incomplete"):
+        generate_text_response(client, instructions="test", input_text="test")
+
+
+@pytest.mark.parametrize("status", ["queued", "in_progress", "cancelled"])
+def test_nonterminal_or_cancelled_responses_are_not_treated_as_answers(status):
+    response = FakeResponse(content="not a completed answer")
+    response.status = status
+    client = SimpleNamespace(responses=FakeResponses([response]))
+
+    with pytest.raises(RuntimeError, match=f"status={status}"):
+        generate_text_response(client, instructions="test", input_text="test")
+
+
 def test_agent_iterates_over_archive_tool_and_returns_cited_slack_source():
     tool_call = FakeToolCall(
         "call_1",
@@ -174,6 +194,80 @@ def test_agent_iterates_over_archive_tool_and_returns_cited_slack_source():
     assert tool_output["type"] == "function_call_output"
     assert tool_output["call_id"] == "call_1"
     assert "Idea: talk sugli incidents e outages" in tool_output["output"]
+
+
+def test_render_sources_emits_slack_and_archive_links():
+    from ai_agent import render_sources
+
+    evidence = EvidenceRegistry()
+    evidence.register(
+        ArchiveHit(
+            text="incidents",
+            user_id="U011PQ7RHRT",
+            user_name="Giorgio",
+            channel_id="C0BSUCGHU8G",
+            channel_name="dev",
+            timestamp="1787495524.036239",
+            permalink="https://sferait-ws.slack.com/archives/C0BSUCGHU8G/p1787495524036239",
+            thread_ts="1787395457.104349",
+        )
+    )
+
+    rendered = render_sources("Trovato. [S1]", evidence)
+
+    assert "|Slack>" in rendered
+    assert "|SferaArchive>" in rendered
+    assert "channel=C0BSUCGHU8G" in rendered
+    assert "thread_ts=1787395457.104349" in rendered
+
+
+def test_render_sources_keeps_archive_link_when_slack_permalink_is_missing():
+    from ai_agent import render_sources
+
+    evidence = EvidenceRegistry()
+    evidence.register(
+        ArchiveHit(
+            text="incidents",
+            user_id="U011PQ7RHRT",
+            user_name="Giorgio",
+            channel_id="C0BSUCGHU8G",
+            channel_name="dev",
+            timestamp="1787495524.036239",
+            permalink="",
+            thread_ts="1787395457.104349",
+        )
+    )
+
+    rendered = render_sources("Trovato. [S1]", evidence)
+
+    assert "|Slack>" not in rendered
+    assert "|SferaArchive>" in rendered
+
+
+def test_render_sources_escapes_labels_and_rejects_non_slack_permalink():
+    from ai_agent import render_sources
+
+    evidence = EvidenceRegistry()
+    evidence.register(
+        ArchiveHit(
+            text="incidents",
+            user_id="U1",
+            user_name="<https://evil.test|admin>",
+            channel_id="C0BSUCGHU8G",
+            channel_name="dev<&>",
+            timestamp="1787495524.036239",
+            permalink="https://evil.test/tracker",
+            thread_ts="1787395457.104349",
+        )
+    )
+
+    rendered = render_sources("Trovato. [S1]", evidence)
+
+    assert "<https://evil.test|" not in rendered
+    assert "|Slack>" not in rendered
+    assert "&lt;https://evil.test|admin&gt;" in rendered
+    assert "#dev&lt;&amp;&gt;" in rendered
+    assert "|SferaArchive>" in rendered
 
 
 def test_agent_reports_consulted_results_if_model_omits_citation_marker():

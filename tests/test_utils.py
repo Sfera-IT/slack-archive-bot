@@ -246,3 +246,42 @@ def test_migrate_db_backfills_legacy_posted_links():
         "https://slack/message",
         900.1,
     )
+
+
+def test_migrate_db_scrubs_legacy_optout_data_without_retaining_pii_copy(tmp_path):
+    database_path = tmp_path / "archive.sqlite"
+    conn = sqlite3.connect(database_path)
+    cursor = conn.cursor()
+    migrate_db(conn, cursor)
+    cursor.execute(
+        "INSERT INTO users(name, id, avatar, real_name, display_name, email) "
+        "VALUES ('Secret Name', 'U1', 'https://avatar', 'Real Name', 'Display', "
+        "'secret@example.test')"
+    )
+    cursor.execute("INSERT INTO optout(user, timestamp) VALUES ('U1', 'now')")
+    cursor.execute(
+        """
+        INSERT INTO messages
+            (message, user, channel, timestamp, permalink, thread_ts, embeddings)
+        VALUES (?, 'USLACKBOT', 'C1', '1710000000.000100', '',
+                '1710000000.000100', X'01020304')
+        """,
+        ("User opted out of archiving. This message has been deleted",),
+    )
+    cursor.execute(
+        "DELETE FROM privacy_migrations "
+        "WHERE name = 'legacy_optout_artifacts_v2_2_0'"
+    )
+    conn.commit()
+
+    assert migrate_db(conn, cursor) == 2
+
+    assert not (tmp_path / "archive.sqlite.pre-v2.2.bak").exists()
+    assert cursor.execute(
+        "SELECT name, email FROM users WHERE id = 'U1'"
+    ).fetchone() == ("Opted-out user", "")
+    assert cursor.execute(
+        "SELECT embeddings FROM messages WHERE timestamp = '1710000000.000100'"
+    ).fetchone() == (None,)
+    assert migrate_db(conn, cursor) == 0
+    conn.close()

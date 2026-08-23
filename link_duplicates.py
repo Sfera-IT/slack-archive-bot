@@ -65,6 +65,9 @@ class StoredAlert:
     alert_message_ts: str
 
 
+MAX_EXTERNAL_LINKS_PER_MESSAGE = 10
+
+
 def is_slack_url(url: str) -> bool:
     try:
         hostname = (urlsplit(url).hostname or "").lower().rstrip(".")
@@ -95,6 +98,8 @@ def extract_external_links(
             continue
         seen.add(normalized_url)
         links.append(ExternalLink(original_url, normalized_url))
+        if len(links) >= MAX_EXTERNAL_LINKS_PER_MESSAGE:
+            break
     return links
 
 
@@ -959,23 +964,22 @@ def reconcile_edited_message_links(
     }
     removed = existing - active_normalized_urls
     if removed:
-        placeholders = ",".join("?" for _ in removed)
-        conn.execute(
-            f"""
+        conn.executemany(
+            """
             DELETE FROM message_links
             WHERE channel = ? AND message_timestamp = ?
-              AND normalized_url IN ({placeholders})
+              AND normalized_url = ?
             """,
-            (channel, message_timestamp, *sorted(removed)),
+            [(channel, message_timestamp, url) for url in sorted(removed)],
         )
         _cancel_unreferenced_jobs(conn, removed)
-        conn.execute(
-            f"""
+        conn.executemany(
+            """
             DELETE FROM link_match_scans
             WHERE current_channel = ? AND current_message_ts = ?
-              AND current_normalized_url IN ({placeholders})
+              AND current_normalized_url = ?
             """,
-            (channel, message_timestamp, *sorted(removed)),
+            [(channel, message_timestamp, url) for url in sorted(removed)],
         )
 
     alerts = [

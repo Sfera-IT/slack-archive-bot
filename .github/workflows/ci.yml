@@ -34,6 +34,17 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Audit runtime dependencies
+        run: uv run --with pip-audit pip-audit
+
+      - name: Compile application
+        run: git ls-files -z '*.py' | xargs -0 uv run python -m py_compile
+
+      - name: Scan medium/high Python security findings
+        run: >-
+          git ls-files -z '*.py' ':!tests/**' ':!utilities/**' |
+          xargs -0 uv run --with bandit bandit -q -ll --
+
       - name: Run tests
         run: uv run pytest tests
 
@@ -59,3 +70,5 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             PY_BUILD_VERS=3.11
+            APP_VERSION=2.2.0
+            APP_REVISION=${{ github.sha }}
