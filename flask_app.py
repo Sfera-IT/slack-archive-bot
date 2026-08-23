@@ -317,10 +317,16 @@ def _oauth_state_digest(state):
     # OAuth state values are high-entropy nonces, not passwords. Key the
     # persisted digest as defense in depth so a leaked state table cannot be
     # used to validate captured values without the application secret.
-    return hmac.new(
+    digest_key = hashlib.blake2b(
         str(flask_app.secret_key).encode('utf-8'),
+        digest_size=64,
+        person=b'sfera-oauth-key',
+    ).digest()
+    return hashlib.blake2b(
         state.encode('utf-8'),
-        hashlib.sha256,
+        key=digest_key,
+        digest_size=32,
+        person=b'sfera-oauth-v1',
     ).hexdigest()
 
 

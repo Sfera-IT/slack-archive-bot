@@ -1,6 +1,5 @@
 import datetime
 import hashlib
-import hmac
 import importlib
 import os
 import sqlite3
@@ -216,10 +215,16 @@ def test_oauth_state_is_persisted_as_keyed_digest(web_module):
     stored = conn.execute("SELECT state_hash FROM oauth_states").fetchone()[0]
     conn.close()
 
-    expected = hmac.new(
+    digest_key = hashlib.blake2b(
         str(module.flask_app.secret_key).encode("utf-8"),
+        digest_size=64,
+        person=b"sfera-oauth-key",
+    ).digest()
+    expected = hashlib.blake2b(
         state.encode("utf-8"),
-        hashlib.sha256,
+        key=digest_key,
+        digest_size=32,
+        person=b"sfera-oauth-v1",
     ).hexdigest()
     assert stored == expected
     assert stored != hashlib.sha256(state.encode("utf-8")).hexdigest()
