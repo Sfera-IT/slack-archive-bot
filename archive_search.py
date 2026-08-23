@@ -7,10 +7,12 @@ never bypass channel visibility or AI opt-out rules enforced here.
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 ROME = ZoneInfo("Europe/Rome")
@@ -18,6 +20,25 @@ MAX_QUERY_CHARS = 240
 MAX_RESULTS = 20
 MAX_MESSAGE_CHARS = 700
 OPTED_OUT_TEXT = "User opted out of archiving. This message has been deleted"
+DEFAULT_ARCHIVE_FRONTEND_URL = "https://sferaarchive-client.vercel.app/"
+
+
+def build_archive_url(channel_id: str, thread_ts: str, message_ts: str) -> str:
+    """Build the SferaArchive deep link understood by the current frontend."""
+    if not channel_id or not thread_ts or not message_ts:
+        return ""
+    base_url = (
+        os.getenv("SFERAARCHIVE_FRONTEND_URL")
+        or os.getenv("CLIENT_URL")
+        or DEFAULT_ARCHIVE_FRONTEND_URL
+    ).rstrip("/") + "/"
+    return base_url + "?" + urlencode(
+        {
+            "channel": channel_id,
+            "thread_ts": thread_ts,
+            "message_ts": message_ts,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -40,6 +61,10 @@ class ArchiveHit:
             )
         except (TypeError, ValueError, OSError):
             return "data sconosciuta"
+
+    @property
+    def archive_url(self) -> str:
+        return build_archive_url(self.channel_id, self.thread_ts, self.timestamp)
 
 
 class EvidenceRegistry:
@@ -80,6 +105,7 @@ class EvidenceRegistry:
                     "thread_ts": hit.thread_ts,
                     "message_ts": hit.timestamp,
                     "permalink": hit.permalink,
+                    "archive_url": hit.archive_url,
                 }
             )
         return {"count": len(results), "results": results}

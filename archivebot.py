@@ -99,6 +99,9 @@ app = App(
     token=os.environ.get("SLACK_BOT_TOKEN"),
     signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
     logger=logger,
+    # Importing the Flask application must not require a successful Slack API
+    # round-trip.  Identity is refreshed lazily when messages are processed.
+    token_verification_enabled=False,
 )
 
 CHANNEL_RECAP_MESSAGE_LIMIT = 1000
@@ -117,18 +120,41 @@ ENGAGED_THREAD_STOP_ACTION_ID = "trash_stop_thread"  # legacy action_id: non cam
 # URL cleaner instance loading local rules
 _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "url_rules.json"))
 
-# Save the bot user's user ID e display name (per identificare i propri messaggi nei thread)
-app._bot_user_id = app.client.auth_test()["user_id"]
-try:
-    _bot_profile = app.client.users_info(user=app._bot_user_id)["user"]["profile"]
-    app._bot_display_name = (
-        _bot_profile.get("display_name")
-        or _bot_profile.get("real_name")
-        or "bot"
-    )
-except Exception as _e:
-    logger.warning(f"Impossibile recuperare display_name del bot: {_e}")
-    app._bot_display_name = "bot"
+# Slack identity is stable for this app and can be overridden at runtime.  A
+# transient Slack outage must not prevent Gunicorn from importing the app.
+app._bot_user_id = os.getenv("SLACK_BOT_USER_ID", "U02V2KN5JKS")
+app._bot_display_name = "bot"
+app._bot_identity_verified = bool(app._bot_user_id)
+_bot_identity_lock = threading.Lock()
+
+
+def _initialize_bot_identity():
+    """Refresh bot identity without making message handling depend on Slack."""
+    with _bot_identity_lock:
+        if app._bot_identity_verified:
+            return app._bot_user_id
+        try:
+            authenticated_user_id = app.client.auth_test()["user_id"]
+            app._bot_user_id = authenticated_user_id
+            app._bot_identity_verified = True
+            try:
+                bot_profile = app.client.users_info(user=authenticated_user_id)["user"][
+                    "profile"
+                ]
+                app._bot_display_name = (
+                    bot_profile.get("display_name")
+                    or bot_profile.get("real_name")
+                    or "bot"
+                )
+            except Exception as error:
+                logger.warning("Could not resolve bot display name: %s", error)
+        except Exception as error:
+            logger.warning(
+                "Could not refresh Slack bot identity; using configured ID %s: %s",
+                app._bot_user_id,
+                error,
+            )
+        return app._bot_user_id
 
 
 MENTION_HINT_PROMPT = (
@@ -1129,6 +1155,7 @@ def handle_user_change(event):
 
 
 def handle_message(message, say):
+    _initialize_bot_identity()
     logger.debug(message)
     user_id = message.get("user", "unknown")
     channel_type = message.get("channel_type", "unknown")
@@ -1241,6 +1268,10 @@ def handle_message(message, say):
         conn.commit()
         conn.close()
 
+        # Engage is a core reply path: run it immediately after persistence so
+        # unrelated link/reaction/user enrichment failures cannot silence it.
+        maybe_reply_to_engaged_thread(message, say)
+
         # Keep original message data for link-adjacent behaviors.
         original_message = message.copy()
         original_message["text"] = original_text
@@ -1319,13 +1350,6 @@ def handle_message(message, say):
 
         conn.close()
 
-        # Reply continuo solo nei thread ingaggiati esplicitamente con @bot /engage.
-        try:
-            maybe_reply_to_engaged_thread(message, say)
-        except Exception as e:
-            logger.error(f"[ENGAGE] Eccezione non gestita in maybe_reply_to_engaged_thread: {e}")
-            logger.error(traceback.format_exc())
-
     logger.debug("--------------------------")
 
 
@@ -1348,9 +1372,117 @@ def handle_message_with_file(event, say):
     handle_message(message, say)
 
 
+def _message_replied_identity(event):
+    """Extract the newest reply identity from Slack's message_replied wrapper."""
+    root_message = event.get("message")
+    if not isinstance(root_message, dict):
+        return "", "", ""
+    channel = str(event.get("channel") or "")
+    thread_ts = str(root_message.get("thread_ts") or root_message.get("ts") or "")
+    candidates = [str(root_message.get("latest_reply") or "")]
+    candidates.extend(
+        str(reply.get("ts") or "")
+        for reply in (root_message.get("replies") or [])
+        if isinstance(reply, dict)
+    )
+    reply_timestamps = [value for value in candidates if value and value != thread_ts]
+    if not channel or not thread_ts or not reply_timestamps:
+        return "", "", ""
+    try:
+        reply_ts = max(reply_timestamps, key=float)
+    except (TypeError, ValueError):
+        reply_ts = max(reply_timestamps)
+    return channel, thread_ts, reply_ts
+
+
+def _active_engagement_exists(channel, thread_ts):
+    conn, cursor = db_connect(database_path)
+    try:
+        row = cursor.execute(
+            "SELECT engaged, stopped FROM engaged_threads "
+            "WHERE channel = ? AND thread_ts = ?",
+            (channel, thread_ts),
+        ).fetchone()
+        return bool(row and row[0] and not row[1])
+    finally:
+        conn.close()
+
+
+def _fetch_raw_thread_reply(channel, thread_ts, reply_ts):
+    """Fetch a reply that Slack represented only as message_replied metadata."""
+    cursor = None
+    while True:
+        response = app.client.conversations_replies(
+            channel=channel,
+            ts=thread_ts,
+            cursor=cursor,
+            limit=200,
+        )
+        for reply in response.get("messages", []):
+            if str(reply.get("ts") or "") == reply_ts:
+                return reply
+        cursor = (response.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            return None
+
+
+@app.event({"type": "message", "subtype": "message_replied"})
+def handle_message_replied(event, say):
+    """Route message_replied wrappers through the normal engaged-thread path."""
+    channel, thread_ts, reply_ts = _message_replied_identity(event)
+    if not channel or not thread_ts or not reply_ts:
+        return
+    try:
+        if not _active_engagement_exists(channel, thread_ts):
+            return
+        reply = _fetch_raw_thread_reply(channel, thread_ts, reply_ts)
+        if not reply:
+            raise RuntimeError("reply Slack non disponibile per message_replied")
+        if (
+            reply.get("bot_id")
+            or reply.get("bot_profile")
+            or reply.get("user") == app._bot_user_id
+        ):
+            return
+        if not reply.get("user") or not reply.get("text"):
+            raise RuntimeError("reply Slack incompleta per message_replied")
+        handle_message(
+            {
+                **reply,
+                "channel": channel,
+                "thread_ts": thread_ts,
+                "channel_type": str(event.get("channel_type") or "channel"),
+            },
+            say,
+        )
+    except Exception as error:
+        _report_ai_error(
+            error,
+            event={
+                "user": "",
+                "channel": channel,
+                "ts": reply_ts,
+                "thread_ts": thread_ts,
+            },
+            source="message_replied_router",
+            say=say,
+            thread_ts=thread_ts,
+        )
+
+
 @app.message("")
 def handle_message_default(message, say):
     handle_message(message, say)
+
+
+def handle_bolt_error(error, body):
+    """Deliver otherwise-unhandled Slack event failures to opted-in debug DMs."""
+    event = body.get("event", body) if isinstance(body, dict) else {}
+    _report_ai_error(error, event=event, source="bolt_event")
+
+
+if hasattr(app, "error"):
+    app.error(handle_bolt_error)
 
 
 def get_archived_thread_messages(channel, thread_ts):

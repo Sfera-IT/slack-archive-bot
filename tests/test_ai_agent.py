@@ -134,7 +134,7 @@ def test_failed_responses_are_raised_for_the_debug_pipeline():
         )
 
 
-def test_agent_iterates_over_archive_tool_and_returns_cited_slack_source():
+def test_agent_returns_slack_and_sferaarchive_links_for_each_source():
     tool_call = FakeToolCall(
         "call_1",
         "grep_archive",
@@ -161,6 +161,9 @@ def test_agent_iterates_over_archive_tool_and_returns_cited_slack_source():
     assert "Ho trovato la proposta" in answer
     assert "*Fonti*" in answer
     assert "https://sferait-ws.slack.com/archives/C1" in answer
+    assert "|Slack>" in answer
+    assert "|SferaArchive>" in answer
+    assert "channel=C1&thread_ts=1600000000.1&message_ts=1600000000.1" in answer
     assert responses.calls[0]["model"] == "gpt-5.6-sol"
     assert responses.calls[0]["reasoning"] == {"effort": "medium"}
     assert responses.calls[0]["tool_choice"] == {
@@ -174,6 +177,7 @@ def test_agent_iterates_over_archive_tool_and_returns_cited_slack_source():
     assert tool_output["type"] == "function_call_output"
     assert tool_output["call_id"] == "call_1"
     assert "Idea: talk sugli incidents e outages" in tool_output["output"]
+    assert '"archive_url"' in tool_output["output"]
 
 
 def test_agent_reports_consulted_results_if_model_omits_citation_marker():
