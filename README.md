@@ -178,9 +178,10 @@ returned. Public channels are searchable workspace-wide; private-channel results
 are available only to members (the current private channel is also allowed because
 the request itself proves access).
 
-AI answers use `gpt-5.6-sol` by default and the OpenAI Responses-capable SDK. The
-runtime currently uses bounded Chat Completions function calls for compatibility
-with the existing bot lifecycle. Configure it with:
+AI answers use `gpt-5.6-sol` and the OpenAI Responses API by default. The bounded
+agent preserves every response output item between stateless tool turns, including
+reasoning items, and returns local archive results as `function_call_output` items.
+Configure it with:
 
 - `OPENAI_MODEL` — answer and retrieval model; default `gpt-5.6-sol`.
 - `OPENAI_REASONING_EFFORT` — `none`, `low`, `medium`, `high`, `xhigh`, or `max`;
@@ -188,10 +189,9 @@ with the existing bot lifecycle. Configure it with:
 - `OPENAI_DECISION_MODEL` — optional override for legacy engage/clown decisions;
   defaults to `OPENAI_MODEL`.
 
-The bounded archive agent currently uses Chat Completions function tools. GPT-5.6
-does not support those tools with reasoning effort enabled on that endpoint, so
-the archive tool loop forces `reasoning_effort=none`. The configured effort still
-applies to compatible non-tool workloads.
+The Responses API allows GPT-5.6 reasoning and archive function tools in the same
+request. The configured reasoning effort therefore applies to the complete search
+loop; the default is `medium`.
 
 The response policy is evidence-first and intentionally sober: no automatic
 sarcasm, recurring inside jokes, or claims of remembering a conversation that was
@@ -204,12 +204,30 @@ To keep the bot engaged in a thread, mention it with:
         @ArchiveBot /engage
 
 From that point on, the bot replies to every new user message in that thread,
-on any channel. To stop it, use the `Zitto` button or mention the bot with
-`stop`, for example:
+on any channel where the app receives message events. Engage events are claimed
+atomically to avoid duplicate Slack deliveries. If live thread history cannot be
+read, the bot falls back to the locally archived thread. To stop it, use the
+`Zitto` button or mention the bot with `stop`, for example:
 
         @ArchiveBot stop
 
 Sending `@ArchiveBot /engage` again in the same thread reactivates it.
+
+Successful AI replies include the current per-user quota (`2/minute`, `10/hour`).
+Engaged replies use the same quota and show a clear retry time when it is reached.
+
+### Private AI diagnostics
+
+AI diagnostics are disabled by default. An administrator can enable sanitized
+private error reports by sending the bot a DM containing:
+
+        /debug
+
+Sending `/debug` again disables them. Explicit forms are also available:
+`/debug on`, `/debug off`, and `/debug status`. Reports include a correlation ID,
+the failing flow (including engaged threads), API metadata, and a bounded stack
+without prompt contents, local variables, tokens, or credentials. Public channels
+only receive the correlation ID.
 
 
 ## Migrating from slack-archive-bot v0.1
