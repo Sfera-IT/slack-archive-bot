@@ -6,11 +6,8 @@ import traceback
 from sentence_transformers import SentenceTransformer
 import re
 import threading
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
 
-from dotenv import load_dotenv
 from slack_bolt import App
 from openai import OpenAI
 
@@ -39,10 +36,6 @@ from link_duplicates import (
     route_link_message_event,
 )
 from sferait_context import SFERAIT_SYSTEM_PROMPT
-from privacy import purge_archived_user_data
-from runtime_config import resolve_database_path
-
-load_dotenv()
 
 # Admin users che possono eseguire comandi privilegiati (stessa lista di flask_app.py)
 ADMIN_USERS = [
@@ -60,11 +53,6 @@ ADMIN_USERS = [
 _sentence_transformer_model = None
 _sentence_transformer_lock = threading.Lock()
 _link_enrichment_worker = None
-EMBEDDING_MODEL_REVISION = os.getenv(
-    "EMBEDDING_MODEL_REVISION",
-    "c9a2bfebc254878aee8c3aca9e6844d5bbb102d1",
-)
-PODCAST_AUDIO_PATH = os.getenv("PODCAST_AUDIO_PATH", "podcast.mp3")
 
 
 def _get_sentence_transformer():
@@ -74,10 +62,7 @@ def _get_sentence_transformer():
         with _sentence_transformer_lock:
             if _sentence_transformer_model is None:
                 logger.info("Loading SentenceTransformer model (one-time initialization)...")
-                _sentence_transformer_model = SentenceTransformer(
-                    "paraphrase-MiniLM-L6-v2",
-                    revision=EMBEDDING_MODEL_REVISION,
-                )
+                _sentence_transformer_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
                 logger.info("SentenceTransformer model loaded successfully")
     return _sentence_transformer_model
 
@@ -85,7 +70,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "-d",
     "--database-path",
-    default=os.getenv("DEFAULT_DATABASE_PATH", "slack.sqlite"),
+    default="slack.sqlite",
     help="path to the SQLite database. (default = ./slack.sqlite)",
 )
 parser.add_argument(
@@ -101,15 +86,12 @@ cmd_args, unknown = parser.parse_known_args()
 
 # Check the environment too
 log_level = os.environ.get("ARCHIVE_BOT_LOG_LEVEL", cmd_args.log_level)
-database_path = (
-    resolve_database_path(default=cmd_args.database_path)
-)
+database_path = os.environ.get("ARCHIVE_BOT_DATABASE_PATH", cmd_args.database_path)
 port = os.environ.get("ARCHIVE_BOT_PORT", cmd_args.port)
 
 # Setup logging
 log_level = log_level.upper()
-if log_level not in ["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"]:
-    raise ValueError(f"Unsupported log level: {log_level}")
+assert log_level in ["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"]
 logging.basicConfig(level=getattr(logging, log_level))
 logger = logging.getLogger(__name__)
 
@@ -117,10 +99,6 @@ app = App(
     token=os.environ.get("SLACK_BOT_TOKEN"),
     signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
     logger=logger,
-    # Do not make container startup depend on Slack network availability. Bolt
-    # still authenticates the first event; our explicit identity initializer
-    # adds retry/readiness handling and validates SLACK_BOT_USER_ID mismatches.
-    token_verification_enabled=False,
 )
 
 CHANNEL_RECAP_MESSAGE_LIMIT = 1000
@@ -133,55 +111,24 @@ AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage nei 
 AI_RESPONSE_MODEL = os.getenv("OPENAI_MODEL", DEFAULT_AI_MODEL)
 AI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "medium")
 AUTO_ENGAGE_DECISION_MODEL = os.getenv("OPENAI_DECISION_MODEL", AI_RESPONSE_MODEL)
-ARCHIVE_AGENT_ENABLED = os.getenv("ARCHIVE_AGENT_ENABLED", "true").strip().lower() in {
-    "1", "true", "yes", "on"
-}
-THREAD_ENGAGEMENT_ENABLED = os.getenv(
-    "THREAD_ENGAGEMENT_ENABLED", "true"
-).strip().lower() in {"1", "true", "yes", "on"}
 STOP_HINT_SUFFIX_TEMPLATE = "\n\n_per fermarmi: `<@{bot_id}> stop`_"
 ENGAGED_THREAD_STOP_ACTION_ID = "trash_stop_thread"  # legacy action_id: non cambiarlo, i bottoni esistenti lo usano.
 
 # URL cleaner instance loading local rules
 _url_cleaner = UrlCleaner(rules_file=os.path.join(os.path.dirname(__file__), "url_rules.json"))
 
-# Resolve bot identity during startup, not module import. A transient Slack outage
-# must not prevent Gunicorn from importing the application or serving healthz.
-app._bot_user_id = os.getenv("SLACK_BOT_USER_ID", "")
-app._bot_display_name = "bot"
-app._bot_identity_verified = False
-_bot_identity_lock = threading.Lock()
-
-
-def _initialize_bot_identity():
-    with _bot_identity_lock:
-        configured_user_id = app._bot_user_id
-        try:
-            authenticated_user_id = app.client.auth_test()["user_id"]
-        except Exception:
-            if not configured_user_id:
-                raise
-            app._bot_identity_verified = False
-            return configured_user_id
-        if configured_user_id and authenticated_user_id != configured_user_id:
-            app._bot_user_id = ""
-            app._bot_identity_verified = False
-            raise RuntimeError("SLACK_BOT_USER_ID does not match Slack auth.test")
-        app._bot_user_id = authenticated_user_id
-        app._bot_identity_verified = True
-        try:
-            bot_profile = app.client.users_info(user=app._bot_user_id)["user"]["profile"]
-            app._bot_display_name = (
-                bot_profile.get("display_name")
-                or bot_profile.get("real_name")
-                or "bot"
-            )
-        except Exception as exception:
-            logger.warning(
-                "Could not resolve bot display name type=%s",
-                type(exception).__name__,
-            )
-    return app._bot_user_id
+# Save the bot user's user ID e display name (per identificare i propri messaggi nei thread)
+app._bot_user_id = app.client.auth_test()["user_id"]
+try:
+    _bot_profile = app.client.users_info(user=app._bot_user_id)["user"]["profile"]
+    app._bot_display_name = (
+        _bot_profile.get("display_name")
+        or _bot_profile.get("real_name")
+        or "bot"
+    )
+except Exception as _e:
+    logger.warning(f"Impossibile recuperare display_name del bot: {_e}")
+    app._bot_display_name = "bot"
 
 
 MENTION_HINT_PROMPT = (
@@ -193,65 +140,29 @@ MENTION_HINT_PROMPT = (
 )
 
 
-@dataclass(frozen=True)
-class EngagedThreadTrigger:
-    """Immutable identity and content of the Slack event that triggered engage."""
-
-    user_id: str
-    text: str
-    message_ts: str
-    channel: str
-    thread_ts: str
-
-    def as_event(self):
-        return {
-            "user": self.user_id,
-            "text": self.text,
-            "ts": self.message_ts,
-            "channel": self.channel,
-            "thread_ts": self.thread_ts,
-        }
-
-
 def _report_ai_error(exception, *, event, source, say=None, thread_ts=None):
     """Log one AI failure, notify opted-in admins, and post a safe reference."""
     error_id = new_ai_error_id()
     logger.error(
-        "[AI][%s][%s] Request failed type=%s",
+        "[AI][%s][%s] Request failed: %s",
         error_id,
         source,
-        type(exception).__name__,
+        exception,
+        exc_info=True,
     )
 
     recipients = []
     try:
         conn, cursor = db_connect(database_path)
         try:
-            recipients = get_ai_debug_recipients(cursor, ADMIN_USERS)
-            channel_id = str(event.get("channel") or "")
-            if channel_id:
-                channel = cursor.execute(
-                    "SELECT is_private FROM channels WHERE id = ?",
-                    (channel_id,),
-                ).fetchone()
-                if channel is None:
-                    recipients = []
-                elif bool(channel[0]):
-                    recipients = [
-                        recipient
-                        for recipient in recipients
-                        if cursor.execute(
-                            "SELECT 1 FROM members WHERE channel = ? AND user = ? LIMIT 1",
-                            (channel_id, recipient),
-                        ).fetchone()
-                    ]
+            recipients = get_ai_debug_recipients(cursor)
         finally:
             conn.close()
     except Exception as subscription_error:
         logger.exception(
-            "[AI][%s] Failed to load private debug subscribers type=%s",
+            "[AI][%s] Failed to load private debug subscribers: %s",
             error_id,
-            type(subscription_error).__name__,
+            subscription_error,
         )
 
     for recipient_user_id in recipients:
@@ -268,10 +179,10 @@ def _report_ai_error(exception, *, event, source, say=None, thread_ts=None):
             )
         except Exception as debug_error:
             logger.exception(
-                "[AI][%s] Failed to send private debug to subscriber %s type=%s",
+                "[AI][%s] Failed to send private debug to subscriber %s: %s",
                 error_id,
                 recipient_user_id,
-                type(debug_error).__name__,
+                debug_error,
             )
 
     if say is not None:
@@ -285,31 +196,6 @@ def _report_ai_error(exception, *, event, source, say=None, thread_ts=None):
             logger.exception("[AI][%s] Failed to post public error reference", error_id)
     return error_id
 
-
-@app.error
-def handle_bolt_error(error, body, logger):
-    """Route otherwise-unhandled Bolt listener failures to private diagnostics."""
-    payload = body if isinstance(body, dict) else {}
-    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
-    if not event:
-        raw_user = payload.get("user")
-        raw_channel = payload.get("channel")
-        event = {
-            "user": payload.get("user_id")
-            or (raw_user.get("id") if isinstance(raw_user, dict) else raw_user),
-            "channel": payload.get("channel_id")
-            or (
-                raw_channel.get("id")
-                if isinstance(raw_channel, dict)
-                else raw_channel
-            ),
-            "ts": payload.get("message_ts") or payload.get("trigger_id"),
-        }
-    try:
-        _report_ai_error(error, event=event, source="bolt_unhandled")
-    except Exception:
-        logger.exception("Failed to route unhandled Bolt error to AI diagnostics")
-
 # Nota: clown_users è ora memorizzato nel database per essere condiviso tra worker Gunicorn
 # Le funzioni seguenti gestiscono la lettura/scrittura dal database
 
@@ -318,21 +204,10 @@ def handle_bolt_error(error, body, logger):
 # Necessary for User ID correlation
 def update_users(conn, cursor):
     logger.info("Updating users")
-    info = app.client.users_list(limit=200)
-    members = list(info["members"])
-    next_cursor = (info.get("response_metadata") or {}).get("next_cursor")
-    while next_cursor:
-        info = app.client.users_list(limit=200, cursor=next_cursor)
-        members.extend(info["members"])
-        next_cursor = (info.get("response_metadata") or {}).get("next_cursor")
+    info = app.client.users_list()
 
     args = []
-    opted_out_users = {
-        row[0] for row in cursor.execute("SELECT user FROM optout").fetchall()
-    }
-    for m in members:
-        if m["id"] in opted_out_users:
-            continue
+    for m in info["members"]:
         name = m["profile"]["display_name"]
         if not name:
             name = m["profile"]["real_name"]
@@ -360,7 +235,7 @@ def create_embeddings(message):
         embeddings = model.encode(message)
     except Exception as e:
         logger.warning(f"Error creating embeddings: {e}")
-        embeddings = None
+        embeddings = ""
     return embeddings
 
 
@@ -386,15 +261,9 @@ def get_channel_info(channel_id):
 
 def update_channels(conn, cursor):
     logger.info("Updating channels")
-    response = app.client.conversations_list(types="public_channel,private_channel")
-    channels = list(response["channels"])
-    next_cursor = (response.get("response_metadata") or {}).get("next_cursor")
-    while next_cursor:
-        response = app.client.conversations_list(
-            types="public_channel,private_channel", cursor=next_cursor
-        )
-        channels.extend(response["channels"])
-        next_cursor = (response.get("response_metadata") or {}).get("next_cursor")
+    channels = app.client.conversations_list(types="public_channel,private_channel")[
+        "channels"
+    ]
 
     channel_args = []
     member_args = []
@@ -411,12 +280,7 @@ def update_channels(conn, cursor):
     cursor.executemany(
         "INSERT INTO channels(name, id, is_private) VALUES(?,?,?)", channel_args
     )
-    # Replace the complete snapshot only after every Slack page was fetched.
-    # This revokes stale memberships left by missed offline events.
-    cursor.execute("DELETE FROM members")
-    cursor.executemany(
-        "INSERT OR IGNORE INTO members(channel, user) VALUES(?,?)", member_args
-    )
+    cursor.executemany("INSERT INTO members(channel, user) VALUES(?,?)", member_args)
     conn.commit()
 
 
@@ -575,7 +439,7 @@ def handle_query(event, cursor, say):
     text = event.get("text", "").strip()
     user_id = event.get("user", "unknown")
     
-    logger.info("[DM] received user=%s chars=%s", user_id, len(text))
+    logger.info(f"[CLOWN] Received DM from user {user_id}, text: '{text}'")
 
     # Il testo senza slash funziona sempre in DM. /debug resta supportato quando
     # Slack lo consegna come messaggio invece che come Slash Command nativo.
@@ -710,25 +574,23 @@ def handle_query(event, cursor, say):
             say(f"ℹ️ L'utente {target_name} ({target_user_id}) è già in opt-out.")
             return
 
-        # Esegui la stessa purge transazionale usata dall'interfaccia web.
+        # Esegui l'opt-out
         try:
-            purge_archived_user_data(cursor.connection, target_user_id)
+            cursor.execute(
+                "INSERT INTO optout (user, timestamp) VALUES (?, CURRENT_TIMESTAMP)",
+                (target_user_id,)
+            )
+            cursor.execute(
+                'UPDATE messages SET message = "User opted out of archiving. This message has been deleted", user = "USLACKBOT", permalink = "" WHERE user = ?',
+                (target_user_id,)
+            )
             cursor.connection.commit()
-            try:
-                Path(PODCAST_AUDIO_PATH).unlink(missing_ok=True)
-            except OSError:
-                logger.warning("Could not remove admin-opt-out-invalidated podcast audio")
             logger.info(f"[OPTOUT] Admin {user_id} executed opt-out for user {target_user_id} ({target_name})")
             say(f"✅ Opt-out eseguito per l'utente {target_name} ({target_user_id}). Tutti i suoi messaggi sono stati anonimizzati.")
         except Exception as e:
-            error_id = new_ai_error_id()
-            logger.error(
-                "[OPTOUT][%s] Admin opt-out failed type=%s",
-                error_id,
-                type(e).__name__,
-            )
+            logger.error(f"[OPTOUT] Error executing opt-out for {target_user_id}: {e}")
             cursor.connection.rollback()
-            say(f"❌ Errore durante l'opt-out. Riferimento: `{error_id}`.")
+            say(f"❌ Errore durante l'opt-out: {e}")
         return
 
     # Comportamento di default per altri messaggi
@@ -763,11 +625,12 @@ def get_first_reply_in_thread(res):
 def get_permalink_and_save(res):
     if res[4] == "":
         newres = get_first_reply_in_thread(res)
-        logger.debug("Resolving missing permalink from archived metadata")
+        logger.debug("Getting Permalink for res: ")
+        logger.debug(res)
         conn, cursor = db_connect(database_path)
 
         permalink = app.client.chat_getPermalink(channel=newres[3], message_ts=newres[2])
-        logger.debug("Resolved missing permalink")
+        logger.debug(permalink["permalink"])
         res = res[:-1]
         res = res + (permalink["permalink"],)
 
@@ -787,7 +650,7 @@ def normalize_url(url):
     try:
         return _url_cleaner.clean(url)
     except Exception as e:
-        logger.warning("Error normalizing URL: %s", type(e).__name__)
+        logger.warning(f"Error normalizing URL {url}: {e}")
         return url
 
 
@@ -1192,13 +1055,10 @@ def handle_join(event):
                 "INSERT INTO channels(name, id, is_private) VALUES(?,?,?)",
                 (channel_name, channel_id, channel_is_private),
             )
-            cursor.execute("DELETE FROM members WHERE channel = ?", (channel_id,))
-            cursor.executemany(
-                "INSERT OR IGNORE INTO members(channel, user) VALUES(?,?)", members
-            )
+            cursor.executemany("INSERT INTO members(channel, user) VALUES(?,?)", members)
         else:
             cursor.execute(
-                "INSERT OR IGNORE INTO members(channel, user) VALUES(?,?)",
+                "INSERT INTO members(channel, user) VALUES(?,?)",
                 (event["channel"], event["user"]),
             )
         conn.commit()
@@ -1262,124 +1122,19 @@ def handle_user_change(event):
 
     conn, cursor = db_connect(database_path)
     try:
-        cursor.execute(
-            '''
-            UPDATE users SET name = ?
-            WHERE id = ? AND id NOT IN (SELECT user FROM optout)
-            ''',
-            (new_username, user_id),
-        )
+        cursor.execute("UPDATE users SET name = ? WHERE id = ?", (new_username, user_id))
         conn.commit()
     finally:
         conn.close()
 
 
-def _is_automated_message(message):
-    """Return True for third-party bot messages that must not trigger AI."""
-    return bool(
-        message.get("bot_id")
-        or message.get("bot_profile")
-        or message.get("subtype") == "bot_message"
-    )
-
-
-def _user_privacy_flags(user_id):
-    """Return archive/AI opt-out flags from SQLite; failures remain fail-closed."""
-    if not user_id:
-        return False, False
-    conn, cursor = db_connect(database_path)
-    try:
-        cursor.execute("SELECT 1 FROM optout WHERE user = ? LIMIT 1", (user_id,))
-        archive_opted_out = cursor.fetchone() is not None
-        cursor.execute("SELECT 1 FROM optout_ai WHERE user = ? LIMIT 1", (user_id,))
-        ai_opted_out = cursor.fetchone() is not None
-        return archive_opted_out, ai_opted_out
-    finally:
-        conn.close()
-
-
-def _engaged_trigger_from_message(message):
-    """Freeze the relevant event data before legacy handlers can mutate it."""
-    if _is_automated_message(message):
-        return None
-    user_id = str(message.get("user") or "")
-    message_ts = str(message.get("ts") or "")
-    channel = str(message.get("channel") or "")
-    thread_ts = str(message.get("thread_ts") or "")
-    if not user_id or not message_ts or not channel or not thread_ts or thread_ts == message_ts:
-        return None
-    return EngagedThreadTrigger(
-        user_id=user_id,
-        text=str(message.get("text") or ""),
-        message_ts=message_ts,
-        channel=channel,
-        thread_ts=thread_ts,
-    )
-
-
-def _log_engage_gate(reason, trigger=None, *, message=None, level=logging.DEBUG):
-    """Emit one structured, content-free decision log for engage routing."""
-    event = trigger.as_event() if trigger is not None else (message or {})
-    logger.log(
-        level,
-        "[ENGAGE] gate=%s channel=%s thread_ts=%s message_ts=%s user=%s",
-        reason,
-        event.get("channel") or "",
-        event.get("thread_ts") or "",
-        event.get("ts") or "",
-        event.get("user") or "",
-    )
-
-
-def _timestamp_at_or_before(value, cutoff):
-    if not value or not cutoff:
-        return False
-    try:
-        return float(value) <= float(cutoff)
-    except (TypeError, ValueError):
-        return str(value) <= str(cutoff)
-
-
-def _route_message_links_safely(message, say):
-    """Keep link collection independent from the engage/AI availability path."""
-    try:
-        archive_opted_out, ai_opted_out = _user_privacy_flags(message.get("user"))
-        if archive_opted_out or ai_opted_out:
-            reason = "archive_optout_link_skip" if archive_opted_out else "ai_optout_link_skip"
-            _log_engage_gate(reason, message=message, level=logging.INFO)
-            return
-        route_link_message_event(
-            message,
-            normalize_url,
-            lambda links: check_and_store_links(
-                message,
-                {"permalink": ""},
-                say,
-                links=links,
-            ),
-        )
-    except Exception as error:
-        logger.exception("[ENGAGE] Link routing failed; continuing message handling")
-        _report_ai_error(
-            error,
-            event=dict(message),
-            source="message_link_routing",
-        )
-
-
-def _handle_message_impl(message, say):
+def handle_message(message, say):
+    logger.debug(message)
     user_id = message.get("user", "unknown")
     channel_type = message.get("channel_type", "unknown")
-    logger.info(
-        "[MESSAGE] received user=%s channel_type=%s channel=%s thread_ts=%s "
-        "message_ts=%s subtype=%s",
-        user_id,
-        channel_type,
-        message.get("channel") or "",
-        message.get("thread_ts") or "",
-        message.get("ts") or "",
-        message.get("subtype") or "",
-    )
+    text_preview = message.get("text", "")[:50] if message.get("text") else "(no text)"
+    
+    logger.info(f"[CLOWN] handle_message called - user: {user_id}, channel_type: {channel_type}, text_preview: '{text_preview}...'")
     
     message_user = message.get("user")
     if (
@@ -1391,51 +1146,48 @@ def _handle_message_impl(message, say):
         logger.debug("[CLOWN] Skipping message: no user/text or from a bot")
         return
 
-    automated_message = _is_automated_message(message)
-    engage_trigger = _engaged_trigger_from_message(message)
+    # Route links before engage/mention/stop early returns. app_mention and
+    # message events can overlap; message-link and alert claims are idempotent.
+    route_link_message_event(
+        message,
+        normalize_url,
+        lambda links: check_and_store_links(
+            message,
+            {"permalink": ""},
+            say,
+            links=links,
+        ),
+    )
 
     # Controlla se il bot è menzionato nel messaggio
     bot_user_id = app._bot_user_id
     text = message.get("text", "")
+    # Intercetta anche stop testuali copiati male dal suggerimento Slack
+    # (es. _`@slack-archive-bot stop`_), che non generano una mention nativa.
+    try:
+        if _maybe_handle_engaged_stop(message, say):
+            return
+    except Exception as e:
+        logger.error(f"[ENGAGE] Errore intercept stop: {e}")
+        logger.error(traceback.format_exc())
 
-    if not automated_message:
-        # Intercetta anche stop testuali copiati male dal suggerimento Slack
-        # (es. _`@slack-archive-bot stop`_), che non generano una mention nativa.
+    if bot_user_id and f"<@{bot_user_id}>" in text:
+        logger.info(f"[AI] Bot mentioned in message (via handle_message) by user {user_id}")
+        # @bot /engage ingaggia il thread; una mention normale resta one-shot.
         try:
-            if _maybe_handle_engaged_stop(message, say):
+            if _maybe_handle_engage_command(message, say):
                 return
+            handle_app_mention(message, say)
+            return
         except Exception as e:
-            logger.error(f"[ENGAGE] Errore intercept stop: {e}")
-            logger.error(traceback.format_exc())
-
-        if bot_user_id and f"<@{bot_user_id}>" in text:
-            # Mention handlers return early, so preserve link collection here.
-            _route_message_links_safely(message, say)
-            logger.info(f"[AI] Bot mentioned in message (via handle_message) by user {user_id}")
-            # @bot /engage ingaggia il thread; una mention normale resta one-shot.
-            try:
-                if _maybe_handle_engage_command(message, say):
-                    return
-                handle_app_mention(message, say)
-                return
-            except Exception as e:
-                _report_ai_error(
-                    e,
-                    event=message,
-                    source="message_mention_router",
-                    say=say,
-                    thread_ts=message.get("thread_ts") or message.get("ts"),
-                )
-                return
-
-        # Engage runs before archiving/embeddings/link-adjacent legacy behavior.
-        if engage_trigger is not None:
-            maybe_reply_to_engaged_thread(engage_trigger, say)
-    else:
-        _log_engage_gate("automated_message", message=message)
-
-    # For normal engaged replies, link/archive work happens only after the AI path.
-    _route_message_links_safely(message, say)
+            _report_ai_error(
+                e,
+                event=message,
+                source="message_mention_router",
+                say=say,
+                thread_ts=message.get("thread_ts") or message.get("ts"),
+            )
+            return
 
     conn, cursor = db_connect(database_path)
 
@@ -1449,36 +1201,6 @@ def _handle_message_impl(message, say):
     elif "user" not in message:
         logger.warning("No valid user. Previous event not saved")
     else:  # Otherwise save the message to the archive.
-        # Privacy is checked before permalink lookup, embeddings, link-adjacent
-        # behavior, or any other processing of the user's original content.
-        cursor.execute("SELECT 1 FROM optout WHERE user = ? LIMIT 1", (message["user"],))
-        archive_opted_out = cursor.fetchone() is not None
-        cursor.execute(
-            "SELECT 1 FROM optout_ai WHERE user = ? LIMIT 1", (message["user"],)
-        )
-        ai_opted_out = cursor.fetchone() is not None
-        if archive_opted_out:
-            cursor.execute(
-                "INSERT INTO messages VALUES(?, ?, ?, ?, ?, ?, ?)",
-                (
-                    "User opted out of archiving. This message has been deleted",
-                    "USLACKBOT",
-                    message["channel"],
-                    message["ts"],
-                    "",
-                    message.get("thread_ts") or message["ts"],
-                    None,
-                ),
-            )
-            conn.commit()
-            conn.close()
-            logger.info(
-                "Skipped content processing for archive-opted-out user=%s message_ts=%s",
-                message.get("user") or "",
-                message.get("ts") or "",
-            )
-            return
-
         # Duplicate alerts need a citation for roots and replies alike.
         try:
             permalink = app.client.chat_getPermalink(
@@ -1488,13 +1210,22 @@ def _handle_message_impl(message, say):
             logger.warning(f"Could not get permalink while archiving message: {e}")
             permalink = {'permalink': ''}
 
-        # Preserve the original message for non-archival link-adjacent behavior.
+        # Save original message data before opt-out check
         original_text = message.get("text", "")
         original_user = message.get("user", "")
+        
+        # Check if user opted out
+        cursor.execute("SELECT user, timestamp FROM optout WHERE user = ?", (message["user"],))
+        row = cursor.fetchone()
 
         clown_user = message["user"]
 
-        logger.debug("Resolved permalink for archived message")
+        if row is not None:
+            message["text"] = "User opted out of archiving. This message has been deleted"
+            message["user"] = "USLACKBOT"
+            message["permalink"] = ""
+
+        logger.debug(permalink["permalink"])
         cursor.execute(
             "INSERT INTO messages VALUES(?, ?, ?, ?, ?, ?, ?)",
             (
@@ -1504,7 +1235,7 @@ def _handle_message_impl(message, say):
                 message["ts"],
                 permalink["permalink"],
                 message["thread_ts"] if "thread_ts" in message else message["ts"],
-                None if ai_opted_out else create_embeddings(message["text"])
+                create_embeddings(message["text"])
             ),
         )
         conn.commit()
@@ -1515,11 +1246,8 @@ def _handle_message_impl(message, say):
         original_message["text"] = original_text
         original_message["user"] = original_user
         
-        # AI opt-out also excludes link-adjacent derived processing. The raw
-        # message remains archived, but no embeddings, enrichment or generated
-        # helper reply may be produced from it.
-        if not ai_opted_out:
-            post_xcancel_alternatives(original_message, say)
+        # Post xcancel.com alternatives for any x.com links
+        post_xcancel_alternatives(original_message, say)
 
         # Ensure that the user exists in the DB
         conn, cursor = db_connect(database_path)
@@ -1591,45 +1319,20 @@ def _handle_message_impl(message, say):
 
         conn.close()
 
-    logger.debug("--------------------------")
-
-
-def handle_message(message, say):
-    """Protect the Slack message listener while retaining private diagnostics."""
-    if not app._bot_identity_verified:
+        # Reply continuo solo nei thread ingaggiati esplicitamente con @bot /engage.
         try:
-            _initialize_bot_identity()
-        except Exception as exception:
-            logger.error(
-                "Slack bot identity still unavailable type=%s",
-                type(exception).__name__,
-            )
-    diagnostic_event = {
-        "user": message.get("user"),
-        "channel": message.get("channel"),
-        "ts": message.get("ts"),
-        "thread_ts": message.get("thread_ts"),
-    }
-    try:
-        return _handle_message_impl(message, say)
-    except Exception as error:
-        _report_ai_error(
-            error,
-            event=diagnostic_event,
-            source="message_processing",
-        )
+            maybe_reply_to_engaged_thread(message, say)
+        except Exception as e:
+            logger.error(f"[ENGAGE] Eccezione non gestita in maybe_reply_to_engaged_thread: {e}")
+            logger.error(traceback.format_exc())
+
+    logger.debug("--------------------------")
 
 
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_message_with_file(event, say):
     logger = logging.getLogger(__name__)
-    logger.debug(
-        "[MESSAGE] file_share channel=%s thread_ts=%s message_ts=%s user=%s",
-        event.get("channel") or "",
-        event.get("thread_ts") or "",
-        event.get("ts") or "",
-        event.get("user") or "",
-    )
+    logger.debug(event)
 
     # Extract the text and other necessary information from the event
     message = {
@@ -1638,10 +1341,7 @@ def handle_message_with_file(event, say):
         "channel": event["channel"],
         "ts": event["ts"],
         "thread_ts": event.get("thread_ts"),
-        "channel_type": event.get("channel_type"),
-        "subtype": event.get("subtype"),
-        "bot_id": event.get("bot_id"),
-        "bot_profile": event.get("bot_profile"),
+        "channel_type": event["channel_type"]
     }
 
     # Call handle_message with the extracted information
@@ -1691,15 +1391,14 @@ def get_thread_messages(
         messages = response.get("messages", [])
 
         # Continua a recuperare se ci sono più pagine
-        cursor = (response.get("response_metadata") or {}).get("next_cursor")
-        while cursor:
+        while response.get("has_more", False):
+            cursor = response.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
             response = app.client.conversations_replies(
                 channel=channel, ts=thread_ts, cursor=cursor
             )
             messages.extend(response.get("messages", []))
-            cursor = (response.get("response_metadata") or {}).get("next_cursor")
 
         # Ordina i messaggi per timestamp
         messages.sort(key=lambda x: float(x.get("ts", 0)))
@@ -1740,8 +1439,8 @@ def get_channel_messages(channel, latest_ts=None, limit=CHANNEL_RECAP_MESSAGE_LI
         )
         all_messages.extend(response.get("messages", []))
 
-        cursor = (response.get("response_metadata") or {}).get("next_cursor")
-        while cursor and len(all_messages) < limit:
+        while response.get("has_more", False) and len(all_messages) < limit:
+            cursor = response.get("response_metadata", {}).get("next_cursor")
             if not cursor:
                 break
 
@@ -1751,7 +1450,6 @@ def get_channel_messages(channel, latest_ts=None, limit=CHANNEL_RECAP_MESSAGE_LI
                 limit=min(limit - len(all_messages), 200),
             )
             all_messages.extend(response.get("messages", []))
-            cursor = (response.get("response_metadata") or {}).get("next_cursor")
 
         # conversations_history restituisce i messaggi dal più recente al meno recente.
         all_messages = all_messages[:limit]
@@ -1814,8 +1512,7 @@ def get_user_name_map(db_cursor, user_ids):
 
     placeholders = ",".join("?" for _ in user_ids)
     db_cursor.execute(
-        # `placeholders` is a comma-separated sequence of literal `?` markers.
-        f"SELECT id, name, display_name, real_name FROM users WHERE id IN ({placeholders})",  # nosec B608
+        f"SELECT id, name, display_name, real_name FROM users WHERE id IN ({placeholders})",
         tuple(user_ids),
     )
 
@@ -1839,7 +1536,7 @@ def format_ai_rate_limit_footer(throttle_info):
     )
 
 
-def _next_ai_retry_seconds(cursor, user_id, cutoff, window_seconds, now_timestamp):
+def _next_ai_request_time(cursor, user_id, cutoff, window_seconds):
     cursor.execute(
         "SELECT MIN(timestamp) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
         (cutoff, user_id),
@@ -1847,9 +1544,8 @@ def _next_ai_retry_seconds(cursor, user_id, cutoff, window_seconds, now_timestam
     row = cursor.fetchone()
     oldest = row[0] if row else None
     if oldest is None:
-        return 1
-    remaining = float(oldest) + window_seconds - now_timestamp
-    return max(1, int(remaining) + 1)
+        return datetime.now()
+    return datetime.fromtimestamp(float(oldest) + window_seconds)
 
 
 def check_ai_throttle(conn, cursor, user_id, channel):
@@ -1901,12 +1597,12 @@ def check_ai_throttle(conn, cursor, user_id, channel):
     
     # Controlla limiti
     if requests_last_minute >= 2:
-        retry_seconds = _next_ai_retry_seconds(
-            cursor, user_id, one_minute_ago_timestamp, 60, now_timestamp
-        )
+        next_available = _next_ai_request_time(
+            cursor, user_id, one_minute_ago_timestamp, 60
+        ).strftime("%H:%M:%S")
         message = (
             f"⏱️ Limite raggiunto: hai già fatto {requests_last_minute} richieste "
-            f"nell'ultimo minuto. Riprova tra {retry_seconds} secondi.\n\n"
+            f"nell'ultimo minuto. Riprova alle {next_available}.\n\n"
             + format_ai_rate_limit_footer(throttle_info)
         )
         logger.warning(f"[AI] Throttle exceeded: {requests_last_minute} requests in last minute (limit: 2)")
@@ -1914,12 +1610,12 @@ def check_ai_throttle(conn, cursor, user_id, channel):
         return False, message, throttle_info
     
     if requests_last_hour >= 10:
-        retry_seconds = _next_ai_retry_seconds(
-            cursor, user_id, one_hour_ago_timestamp, 60 * 60, now_timestamp
-        )
+        next_available = _next_ai_request_time(
+            cursor, user_id, one_hour_ago_timestamp, 60 * 60
+        ).strftime("%H:%M:%S")
         message = (
             f"⏱️ Limite raggiunto: hai già fatto {requests_last_hour} richieste "
-            f"nell'ultima ora. Riprova tra {retry_seconds} secondi.\n\n"
+            f"nell'ultima ora. Riprova alle {next_available}.\n\n"
             + format_ai_rate_limit_footer(throttle_info)
         )
         logger.warning(f"[AI] Throttle exceeded: {requests_last_hour} requests in last hour (limit: 10)")
@@ -1945,8 +1641,6 @@ def handle_app_mention(event, say):
     """Gestisce le menzioni del bot in una conversazione.
     Può essere chiamata sia dall'evento app_mention che da handle_message."""
     try:
-        if not app._bot_identity_verified:
-            _initialize_bot_identity()
         channel = event.get("channel")
         message_ts = event.get("ts")  # Timestamp del messaggio che menziona il bot
         text = event.get("text", "")
@@ -1954,18 +1648,9 @@ def handle_app_mention(event, say):
         context_scope = get_ai_context_scope(event)
         response_thread_ts = event.get("thread_ts") if context_scope == "thread" else message_ts
 
-        archive_opted_out, ai_opted_out = _user_privacy_flags(user_id)
-        if archive_opted_out or ai_opted_out:
-            say(
-                "Non posso usare l'AI per questa richiesta perché le impostazioni "
-                "privacy dell'autore la escludono.",
-                thread_ts=response_thread_ts,
-            )
-            return
-
         logger.info(
             f"[AI] Bot mentioned by user {user_id} in channel {channel}, "
-            f"message_ts: {message_ts}, scope: {context_scope}"
+            f"message_ts: {message_ts}, scope: {context_scope}, text: '{text[:100]}...'"
         )
         
         # Controlla throttle
@@ -2041,31 +1726,17 @@ def handle_app_mention(event, say):
                 before_timestamp=message_ts,
                 evidence=evidence,
             )
-            current_context = (
-                f"Fonte contesto corrente: {context_label}\n\n{formatted_messages}"
-                + MENTION_HINT_PROMPT
+            final_response = run_archive_agent(
+                client,
+                question=text,
+                current_context=(
+                    f"Fonte contesto corrente: {context_label}\n\n{formatted_messages}"
+                    + MENTION_HINT_PROMPT
+                ),
+                search_engine=search_engine,
+                model=AI_RESPONSE_MODEL,
+                reasoning_effort=AI_REASONING_EFFORT,
             )
-            if ARCHIVE_AGENT_ENABLED:
-                final_response = run_archive_agent(
-                    client,
-                    question=text,
-                    current_context=current_context,
-                    search_engine=search_engine,
-                    model=AI_RESPONSE_MODEL,
-                    reasoning_effort=AI_REASONING_EFFORT,
-                )
-            else:
-                final_response = generate_text_response(
-                    client,
-                    instructions=(
-                        "Rispondi in italiano con tono sobrio usando soltanto il "
-                        "contesto corrente. Non inventare ricordi o fonti e dichiara "
-                        "quando le informazioni non bastano."
-                    ),
-                    input_text=f"{current_context}\n\nDomanda: {text}",
-                    model=AI_RESPONSE_MODEL,
-                    reasoning_effort=AI_REASONING_EFFORT,
-                )
         finally:
             conn_ctx.close()
 
@@ -2293,17 +1964,14 @@ def _engaged_stop_ack_text(user_id=None):
 def _engaged_stop_button_blocks(reply, channel, thread_ts):
     """Crea i blocchi Slack per le risposte dei thread ingaggiati con bottone stop."""
     payload = json.dumps({"channel": channel, "thread_ts": thread_ts})
-    sections = [
+    return [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": chunk,
+                "text": reply[:3000],
             },
-        }
-        for chunk in _split_slack_mrkdwn(reply)
-    ]
-    return sections + [
+        },
         {
             "type": "actions",
             "elements": [
@@ -2330,26 +1998,6 @@ def _engaged_stop_button_blocks(reply, channel, thread_ts):
             ],
         },
     ]
-
-
-def _split_slack_mrkdwn(text, limit=3000, max_chunks=48):
-    """Split a complete reply into Block Kit sections without dropping sources."""
-    remaining = str(text or "")
-    chunks = []
-    while remaining and len(chunks) < max_chunks:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            remaining = ""
-            break
-        split_at = remaining.rfind("\n", 0, limit + 1)
-        if split_at < limit // 2:
-            split_at = limit
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip("\n")
-    if remaining and chunks:
-        suffix = "\n…[risposta troncata per limite Slack]"
-        chunks[-1] = chunks[-1][: limit - len(suffix)].rstrip() + suffix
-    return chunks or ["Non sono riuscito a produrre una risposta."]
 
 
 def _say_engaged_thread_reply(say, reply, channel, thread_ts):
@@ -2475,28 +2123,19 @@ def _auto_reply_in_thread(
     say,
     *,
     response_suffix="",
-    trigger=None,
 ):
     """Reply in an engaged thread through the same grounded archive agent."""
     bot_user_id = app._bot_user_id
-    latest_user_message = (
-        {
-            "user_id": trigger.user_id,
-            "text": trigger.text,
-            "ts": trigger.message_ts,
-        }
-        if trigger is not None
-        else next(
-            (
-                message
-                for message in reversed(thread_messages)
-                if message.get("user_id") and message.get("user_id") != bot_user_id
-            ),
-            None,
-        )
+    latest_user_message = next(
+        (
+            message
+            for message in reversed(thread_messages)
+            if message.get("user_id") and message.get("user_id") != bot_user_id
+        ),
+        None,
     )
     if latest_user_message is None:
-        return False
+        return
 
     formatted_messages = format_messages_for_prompt(thread_messages)
     evidence = EvidenceRegistry()
@@ -2509,34 +2148,18 @@ def _auto_reply_in_thread(
             before_timestamp=latest_user_message.get("ts"),
             evidence=evidence,
         )
-        current_context = (
-            "Fonte contesto corrente: thread Slack ingaggiato\n\n"
-            + formatted_messages
-            + MENTION_HINT_PROMPT
+        reply = run_archive_agent(
+            openai_client,
+            question=latest_user_message.get("text", ""),
+            current_context=(
+                "Fonte contesto corrente: thread Slack ingaggiato\n\n"
+                + formatted_messages
+                + MENTION_HINT_PROMPT
+            ),
+            search_engine=search_engine,
+            model=AI_RESPONSE_MODEL,
+            reasoning_effort=AI_REASONING_EFFORT,
         )
-        if ARCHIVE_AGENT_ENABLED:
-            reply = run_archive_agent(
-                openai_client,
-                question=latest_user_message.get("text", ""),
-                current_context=current_context,
-                search_engine=search_engine,
-                model=AI_RESPONSE_MODEL,
-                reasoning_effort=AI_REASONING_EFFORT,
-            )
-        else:
-            reply = generate_text_response(
-                openai_client,
-                instructions=(
-                    "Rispondi in italiano con tono sobrio usando soltanto il "
-                    "thread corrente. Non inventare ricordi o fonti."
-                ),
-                input_text=(
-                    f"{current_context}\n\nDomanda: "
-                    f"{latest_user_message.get('text', '')}"
-                ),
-                model=AI_RESPONSE_MODEL,
-                reasoning_effort=AI_REASONING_EFFORT,
-            )
     finally:
         conn.close()
 
@@ -2545,8 +2168,6 @@ def _auto_reply_in_thread(
         if response_suffix:
             reply = reply.rstrip() + "\n\n" + response_suffix.strip()
         _say_engaged_thread_reply(say, reply, channel, thread_ts)
-        return True
-    return False
 
 
 _STOP_KEYWORD_RE = re.compile(
@@ -2574,23 +2195,6 @@ def _maybe_handle_engage_command(message, say):
 
     if not is_engage_request(text, bot_user_id):
         return False
-
-    if not THREAD_ENGAGEMENT_ENABLED:
-        say(
-            "L'ingaggio automatico dei thread è temporaneamente disabilitato; "
-            "puoi comunque menzionarmi per una risposta singola.",
-            thread_ts=thread_ts,
-        )
-        return True
-
-    archive_opted_out, ai_opted_out = _user_privacy_flags(user_id)
-    if archive_opted_out or ai_opted_out:
-        say(
-            "Non posso ingaggiarmi: le impostazioni privacy dell'autore "
-            "escludono l'uso dell'AI.",
-            thread_ts=thread_ts,
-        )
-        return True
 
     conn, cursor = db_connect(database_path)
     try:
@@ -2754,29 +2358,18 @@ def handle_engaged_stop_button(ack, body, client):
 
 def maybe_reply_to_engaged_thread(message, say):
     """Risponde a ogni nuovo messaggio utente nei thread ingaggiati con @bot /engage."""
-    if not THREAD_ENGAGEMENT_ENABLED:
-        _log_engage_gate("feature_disabled", message=message, level=logging.INFO)
-        return
-    trigger = (
-        message
-        if isinstance(message, EngagedThreadTrigger)
-        else _engaged_trigger_from_message(message)
-    )
-    if trigger is None:
-        reason = "automated_message" if _is_automated_message(message) else "not_thread_reply"
-        _log_engage_gate(reason, message=message)
-        return
-
-    thread_ts = trigger.thread_ts
-    ts = trigger.message_ts
-    channel = trigger.channel
-    msg_user = trigger.user_id
+    thread_ts = message.get("thread_ts")
+    ts = message.get("ts")
+    channel = message.get("channel")
+    msg_user = message.get("user")
     previous_last_reply_ts = None
     claimed = False
 
     try:
         if msg_user == app._bot_user_id:
-            _log_engage_gate("self_message", trigger)
+            return
+
+        if not thread_ts or thread_ts == ts or not channel or not ts:
             return
 
         conn, cursor = db_connect(database_path)
@@ -2788,14 +2381,7 @@ def maybe_reply_to_engaged_thread(message, say):
                 (thread_ts, channel),
             )
             row = cursor.fetchone()
-            if not row:
-                _log_engage_gate("not_engaged", trigger)
-                return
-            if not row[0]:
-                _log_engage_gate("disabled", trigger, level=logging.INFO)
-                return
-            if row[1]:
-                _log_engage_gate("stopped", trigger, level=logging.INFO)
+            if not row or not row[0] or row[1]:
                 return
             previous_last_reply_ts = row[2]
             if previous_last_reply_ts:
@@ -2804,7 +2390,11 @@ def maybe_reply_to_engaged_thread(message, say):
                 except (TypeError, ValueError):
                     stale_or_duplicate = ts == previous_last_reply_ts
                 if stale_or_duplicate:
-                    _log_engage_gate("stale_or_duplicate", trigger, level=logging.INFO)
+                    logger.info(
+                        "[ENGAGE] Stale or duplicate event %s ignored (last=%s)",
+                        ts,
+                        previous_last_reply_ts,
+                    )
                     return
 
             # Claim atomico: eventi Slack duplicati o concorrenti producono una sola risposta.
@@ -2828,28 +2418,12 @@ def maybe_reply_to_engaged_thread(message, say):
         finally:
             conn.close()
         if not claimed:
-            _log_engage_gate("claimed_elsewhere", trigger, level=logging.INFO)
+            logger.info("[ENGAGE] Event %s already claimed by another worker", ts)
             return
-
-        _log_engage_gate("claimed", trigger, level=logging.INFO)
 
         openai_api_key = os.environ.get("OPENAI_API_KEY")
         if not openai_api_key:
             raise RuntimeError("OPENAI_API_KEY non configurata")
-
-        privacy_conn, privacy_cursor = db_connect(database_path)
-        try:
-            privacy_cursor.execute(
-                "SELECT 1 FROM optout WHERE user = ? "
-                "UNION SELECT 1 FROM optout_ai WHERE user = ? LIMIT 1",
-                (msg_user, msg_user),
-            )
-            trigger_opted_out = privacy_cursor.fetchone() is not None
-        finally:
-            privacy_conn.close()
-        if trigger_opted_out:
-            _log_engage_gate("trigger_opted_out", trigger, level=logging.INFO)
-            return
 
         thread_messages = get_thread_messages(
             channel,
@@ -2857,11 +2431,6 @@ def maybe_reply_to_engaged_thread(message, say):
             fallback_to_archive=True,
             raise_errors=True,
         )
-        thread_messages = [
-            item
-            for item in thread_messages
-            if _timestamp_at_or_before(item.get("ts"), trigger.message_ts)
-        ]
         if not thread_messages:
             raise RuntimeError("thread Slack e fallback archivio non disponibili")
 
@@ -2876,23 +2445,18 @@ def maybe_reply_to_engaged_thread(message, say):
         finally:
             throttle_conn.close()
         if not allowed:
-            _log_engage_gate("throttled", trigger, level=logging.INFO)
             say(throttle_message, thread_ts=thread_ts)
             return
 
         client = OpenAI(api_key=openai_api_key)
-        replied = _auto_reply_in_thread(
+        _auto_reply_in_thread(
             channel,
             thread_ts,
             thread_messages,
             client,
             say,
             response_suffix=format_ai_rate_limit_footer(throttle_info),
-            trigger=trigger,
         )
-        if not replied:
-            raise RuntimeError("risposta AI vuota nel thread ingaggiato")
-        _log_engage_gate("replied", trigger, level=logging.INFO)
     except Exception as e:
         # Rilascia il claim solo se nessun evento successivo lo ha già sostituito.
         if claimed:
@@ -2911,7 +2475,7 @@ def maybe_reply_to_engaged_thread(message, say):
                 logger.exception("[ENGAGE] Failed to release event claim %s", ts)
         _report_ai_error(
             e,
-            event=trigger.as_event(),
+            event=message,
             source="engaged_thread",
             say=say,
             thread_ts=thread_ts,
@@ -3102,14 +2666,17 @@ def maybe_auto_engage_trash(message, say):
 @app.event("app_mention")
 def handle_app_mention_event(event, say):
     """Handler per l'evento app_mention da Slack."""
-    logger.info(
-        "[AI] Received app_mention user=%s channel=%s thread_ts=%s message_ts=%s",
-        event.get("user") or "",
-        event.get("channel") or "",
-        event.get("thread_ts") or "",
-        event.get("ts") or "",
+    logger.info(f"[AI] Received app_mention event: {event}")
+    route_link_message_event(
+        event,
+        normalize_url,
+        lambda links: check_and_store_links(
+            event,
+            {"permalink": ""},
+            say,
+            links=links,
+        ),
     )
-    _route_message_links_safely(event, say)
     try:
         if _maybe_handle_engage_command(event, say):
             return
@@ -3145,75 +2712,33 @@ def handle_message_changed(event, say):
             handle_message_deleted_logic(deleted_ts, event.get("channel"))
         return
 
+    links = extract_external_links(message.get("text", ""), normalize_url)
     conn, cursor = db_connect(database_path)
     try:
-        cursor.execute("SELECT 1 FROM optout WHERE user = ?", (message.get("user"),))
-        archive_opted_out = cursor.fetchone() is not None
         cursor.execute(
-            "SELECT 1 FROM optout_ai WHERE user = ?", (message.get("user"),)
+            """
+            UPDATE messages SET message = ?, embeddings = ?
+            WHERE user = ? AND channel = ? AND timestamp = ?
+            """,
+            (
+                message["text"],
+                create_embeddings(message["text"]),
+                message["user"],
+                event["channel"],
+                message["ts"],
+            ),
         )
-        ai_opted_out = cursor.fetchone() is not None
-        if archive_opted_out:
-            cursor.execute(
-                "UPDATE messages SET message = ?, user = 'USLACKBOT', "
-                "permalink = '', embeddings = NULL WHERE channel = ? AND timestamp = ?",
-                (
-                    "User opted out of archiving. This message has been deleted",
-                    event["channel"],
-                    message["ts"],
-                ),
-            )
-            obsolete_alerts = reconcile_edited_message_links(
-                conn,
-                channel=event["channel"],
-                message_timestamp=message["ts"],
-                active_normalized_urls=set(),
-            )
-            conn.commit()
-            opted_out = True
-        else:
-            opted_out = False
-            links = (
-                []
-                if ai_opted_out
-                else extract_external_links(message.get("text", ""), normalize_url)
-            )
-            cursor.execute(
-                """
-                UPDATE messages SET message = ?, embeddings = ?
-                WHERE user = ? AND channel = ? AND timestamp = ?
-                """,
-                (
-                    message["text"],
-                    None if ai_opted_out else create_embeddings(message["text"]),
-                    message["user"],
-                    event["channel"],
-                    message["ts"],
-                ),
-            )
-            obsolete_alerts = reconcile_edited_message_links(
-                conn,
-                channel=event["channel"],
-                message_timestamp=message["ts"],
-                active_normalized_urls={link.normalized_url for link in links},
-            )
-            conn.commit()
+        obsolete_alerts = reconcile_edited_message_links(
+            conn,
+            channel=event["channel"],
+            message_timestamp=message["ts"],
+            active_normalized_urls={link.normalized_url for link in links},
+        )
+        conn.commit()
     finally:
         conn.close()
 
     _cleanup_stored_duplicate_alerts(obsolete_alerts)
-    if opted_out or ai_opted_out:
-        delete_xcancel_alert(message["ts"], event["channel"])
-        logger.info(
-            "[OPTOUT] skipped derived processing for message edit "
-            "user=%s channel=%s message_ts=%s archive_optout=%s ai_optout=%s",
-            message.get("user") or "",
-            event.get("channel") or "",
-            message.get("ts") or "",
-            opted_out,
-            ai_opted_out,
-        )
-        return
     permalink = {"permalink": ""}
     try:
         permalink = app.client.chat_getPermalink(
@@ -3269,11 +2794,23 @@ def handle_message_deleted_logic(deleted_ts, channel):
             )
             conn.commit()
 
+            # Logging dettagliato
             logger.info(
                 f"MESSAGE_DELETED_LINKS_REMOVED: deleted_ts='{deleted_ts}' "
                 f"channel='{channel}' "
-                f"links_count={len(deleted_links)}"
+                f"links_count={len(deleted_links)} "
+                f"links={[(link[0], link[1]) for link in deleted_links]}"
             )
+
+            # Log dettagliato per ogni link rimosso
+            for link in deleted_links:
+                logger.debug(
+                    f"REMOVED_LINK: normalized_url='{link[0]}' "
+                    f"original_url='{link[1]}' "
+                    f"message_ts='{link[2]}' "
+                    f"channel='{link[3]}' "
+                    f"permalink='{link[4]}'"
+                )
         else:
             logger.debug(
                 f"MESSAGE_DELETED_NO_LINKS: deleted_ts='{deleted_ts}' "
@@ -3330,25 +2867,8 @@ def handle_channel_created(event):
 def init():
     # Initialize the DB if it doesn't exist
     conn, cursor = db_connect(database_path)
-    scrubbed_legacy_optouts = migrate_db(conn, cursor)
-    if scrubbed_legacy_optouts:
-        try:
-            Path(PODCAST_AUDIO_PATH).unlink(missing_ok=True)
-        except OSError:
-            logger.warning("Could not remove legacy-opt-out-invalidated podcast audio")
-        logger.info(
-            "Removed derived data from %s legacy opt-out messages",
-            scrubbed_legacy_optouts,
-        )
+    migrate_db(conn, cursor)
     logger.info("Database migrated")
-
-    try:
-        _initialize_bot_identity()
-    except Exception as exception:
-        logger.error(
-            "Slack bot identity unavailable at startup type=%s; continuing degraded",
-            type(exception).__name__,
-        )
 
     # Update the users and channels in the DB and in the local memory mapping
     try:
@@ -3356,9 +2876,7 @@ def init():
         update_channels(conn, cursor)
     except Exception as e:
         logger.error("Error updating users and channels: %s" % e)
-    finally:
-        conn.close()
-
+    
     # Log stato iniziale della lista clown
     logger.info(f"[CLOWN] Bot initialized. Clown list is empty (will be populated via DM commands)")
 

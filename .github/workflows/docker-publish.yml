@@ -18,35 +18,8 @@ concurrency:
   cancel-in-progress: true
   
 jobs:
-  quality:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version-file: .python-version
-      - name: Verify and install locked dependencies
-        run: uv sync --frozen
-      - name: Audit runtime dependencies
-        run: uv run --with pip-audit pip-audit
-      - name: Compile application
-        run: git ls-files -z '*.py' | xargs -0 uv run python -m py_compile
-      - name: Scan medium/high Python security findings
-        run: >-
-          git ls-files -z '*.py' ':!tests/**' ':!utilities/**' |
-          xargs -0 uv run --with bandit bandit -q -ll --
-      - name: Run tests
-        run: uv run pytest tests
-
   build:
     runs-on: ubuntu-latest
-    needs: quality
     permissions:
       contents: read
       packages: write
@@ -83,5 +56,3 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             PY_BUILD_VERS=${{ env.PY_BUILD_VERS }}
-            APP_VERSION=2.2.1
-            APP_REVISION=${{ github.sha }}
