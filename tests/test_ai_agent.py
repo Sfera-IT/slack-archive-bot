@@ -8,7 +8,11 @@ ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from ai_agent import requires_archive_search, run_archive_agent
+from ai_agent import (
+    chat_tool_reasoning_effort,
+    requires_archive_search,
+    run_archive_agent,
+)
 from archive_search import ArchiveSearchEngine
 from utils import migrate_db
 
@@ -109,7 +113,7 @@ def test_agent_iterates_over_archive_tool_and_returns_cited_slack_source():
     assert "*Fonti*" in answer
     assert "https://sferait-ws.slack.com/archives/C1" in answer
     assert completions.calls[0]["model"] == "gpt-5.6-sol"
-    assert completions.calls[0]["reasoning_effort"] == "medium"
+    assert completions.calls[0]["reasoning_effort"] == "none"
     assert completions.calls[0]["tool_choice"] == {
         "type": "function",
         "function": {"name": "grep_archive"},
@@ -262,3 +266,9 @@ def test_historical_query_detection_covers_the_reported_failure_shape():
     assert requires_archive_search("Cerca nell'archivio chi ha detto questa cosa")
     assert not requires_archive_search("Riassumi questa conversazione corrente")
     assert not requires_archive_search("Come ottimizzo la memoria in Python?")
+
+
+def test_gpt56_chat_function_tools_force_reasoning_none():
+    assert chat_tool_reasoning_effort("gpt-5.6-sol", "medium") == "none"
+    assert chat_tool_reasoning_effort("gpt-5.6", "high") == "none"
+    assert chat_tool_reasoning_effort("gpt-5.5", "medium") == "medium"

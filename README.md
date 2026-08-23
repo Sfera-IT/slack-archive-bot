@@ -188,6 +188,11 @@ with the existing bot lifecycle. Configure it with:
 - `OPENAI_DECISION_MODEL` — optional override for legacy engage/clown decisions;
   defaults to `OPENAI_MODEL`.
 
+The bounded archive agent currently uses Chat Completions function tools. GPT-5.6
+does not support those tools with reasoning effort enabled on that endpoint, so
+the archive tool loop forces `reasoning_effort=none`. The configured effort still
+applies to compatible non-tool workloads.
+
 The response policy is evidence-first and intentionally sober: no automatic
 sarcasm, recurring inside jokes, or claims of remembering a conversation that was
 not found. When the archive does not provide enough evidence, the bot says so.
