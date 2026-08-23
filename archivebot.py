@@ -13,6 +13,7 @@ from openai import OpenAI
 
 from ai_agent import DEFAULT_AI_MODEL, run_archive_agent
 from ai_context import format_messages_for_prompt, get_ai_context_scope, is_engage_request
+from ai_diagnostics import new_ai_error_id, send_private_ai_error
 from archive_search import ArchiveSearchEngine, EvidenceRegistry
 from utils import claim_xcancel_alert, db_connect, finalize_xcancel_alert, migrate_db
 from url_cleaner import UrlCleaner
@@ -1525,12 +1526,44 @@ def handle_app_mention(event, say):
         say(final_response, thread_ts=response_thread_ts)
         
     except Exception as e:
-        logger.error(f"[AI] Error handling app mention: {e}")
-        logger.error(traceback.format_exc())
+        error_id = new_ai_error_id()
+        logger.exception("[AI][%s] Error handling app mention: %s", error_id, e)
+        debug_sent = False
+        user_id = event.get("user")
+        if user_id:
+            try:
+                send_private_ai_error(
+                    app.client,
+                    e,
+                    event=event,
+                    model=AI_RESPONSE_MODEL,
+                    reasoning_effort=AI_REASONING_EFFORT,
+                    error_id=error_id,
+                )
+                debug_sent = True
+            except Exception as debug_error:
+                logger.exception(
+                    "[AI][%s] Failed to send private debug to user %s: %s",
+                    error_id,
+                    user_id,
+                    debug_error,
+                )
+
+        public_message = (
+            "Mi dispiace, c'è stato un errore nel processare la tua richiesta. "
+            f"Riferimento: `{error_id}`."
+        )
+        if debug_sent:
+            public_message += " Ti ho inviato i dettagli tecnici in privato."
+        else:
+            public_message += " Non sono riuscito a inviarti il debug privato."
         try:
-            say("Mi dispiace, c'è stato un errore nel processare la tua richiesta.", thread_ts=event.get("thread_ts", event.get("ts")))
-        except:
-            pass
+            say(
+                public_message,
+                thread_ts=event.get("thread_ts", event.get("ts")),
+            )
+        except Exception:
+            logger.exception("[AI][%s] Failed to post public error reference", error_id)
 
 
 def _is_trash_channel(channel_id, cursor):
