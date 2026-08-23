@@ -263,7 +263,7 @@ def test_health_and_readiness_expose_revision_without_secrets(web_module):
     assert health.status_code == 200
     assert health.get_json() == {
         "status": "degraded",
-        "version": "2.2.0",
+        "version": "2.2.1",
         "revision": "unknown",
     }
     assert health.headers["Cache-Control"] == "no-store"
@@ -415,6 +415,23 @@ def test_runtime_configuration_fails_fast_on_weak_secrets(web_module, monkeypatc
     monkeypatch.setattr(module.flask_app, "secret_key", "too-short")
     with pytest.raises(RuntimeError, match="SECRET_KEY"):
         module._validate_runtime_configuration()
+
+
+def test_invalid_auth_configuration_degrades_instead_of_crashing(
+    web_module, monkeypatch
+):
+    module = web_module
+    monkeypatch.setattr(module.flask_app, "secret_key", "too-short")
+    module.app._bot_identity_verified = True
+    client = module.flask_app.test_client()
+
+    health = client.get("/healthz")
+    assert health.status_code == 200
+    assert health.get_json()["status"] == "degraded"
+    assert health.get_json()["configuration"] == "invalid"
+    assert client.get("/readyz").status_code == 503
+    assert client.get("/login").status_code == 503
+    assert client.get("/whoami").status_code == 503
 
 
 def test_validation_exceptions_are_not_exposed(web_module, monkeypatch):

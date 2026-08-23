@@ -83,5 +83,5 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             PY_BUILD_VERS=${{ env.PY_BUILD_VERS }}
-            APP_VERSION=2.2.0
+            APP_VERSION=2.2.1
             APP_REVISION=${{ github.sha }}

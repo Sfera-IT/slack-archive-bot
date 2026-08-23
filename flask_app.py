@@ -53,7 +53,7 @@ ADMIN_USERS = [
 ]
 
 DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
-APP_VERSION = os.getenv("APP_VERSION", "2.2.0")
+APP_VERSION = os.getenv("APP_VERSION", "2.2.1")
 APP_REVISION = os.getenv("APP_REVISION", "unknown")
 OAUTH_STATE_TTL_SECONDS = 600
 MAX_OAUTH_STATES = 2000
@@ -82,6 +82,8 @@ _embedding_model_lock = threading.Lock()
 def auth_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        if not _jwt_configuration_ready():
+            return jsonify({'error': 'Authentication temporarily unavailable'}), 503
         headers = get_slack_headers()
         g.headers = headers
         user_info = verify_token_and_get_user(headers) if headers else None
@@ -160,8 +162,8 @@ def _is_secure_application_url(parsed):
     }
 
 
-def _validate_runtime_configuration():
-    """Fail at startup instead of discovering broken auth on the first request."""
+def _runtime_configuration_errors():
+    """Return invalid field names without ever returning configuration values."""
     required = {
         'SECRET_KEY': flask_app.secret_key,
         'CLIENT_ID': CLIENT_ID,
@@ -171,28 +173,57 @@ def _validate_runtime_configuration():
         'SLACK_BOT_TOKEN': SLACK_BOT_TOKEN,
         'SLACK_SIGNING_SECRET': SLACK_SIGNING_SECRET,
     }
-    missing = sorted(name for name, value in required.items() if not value)
-    if missing:
-        raise RuntimeError(
-            'Missing required runtime configuration: ' + ', '.join(missing)
-        )
-    if len(str(flask_app.secret_key)) < 32:
-        raise RuntimeError('SECRET_KEY must contain at least 32 characters')
-    if not SLACK_TEAM_ID_RE.fullmatch(str(EXPECTED_TEAM_ID)):
-        raise RuntimeError('EXPECTED_TEAM_ID is not a valid Slack team ID')
+    errors = [name for name, value in required.items() if not value]
+    if flask_app.secret_key and len(str(flask_app.secret_key)) < 32:
+        errors.append('SECRET_KEY')
+    if EXPECTED_TEAM_ID and not SLACK_TEAM_ID_RE.fullmatch(str(EXPECTED_TEAM_ID)):
+        errors.append('EXPECTED_TEAM_ID')
     if _configured_client_origin() is None:
-        raise RuntimeError('CLIENT_URL must use HTTPS (HTTP is allowed only locally)')
+        errors.append('CLIENT_URL')
     if not _is_secure_application_url(urlsplit(OAUTH_REDIRECT_URI)):
-        raise RuntimeError(
-            'OAUTH_REDIRECT_URI must use HTTPS (HTTP is allowed only locally)'
-        )
+        errors.append('OAUTH_REDIRECT_URI')
     configured_bot_user = os.getenv('SLACK_BOT_USER_ID')
     if configured_bot_user and not SLACK_USER_ID_RE.fullmatch(configured_bot_user):
-        raise RuntimeError('SLACK_BOT_USER_ID is not a valid Slack user ID')
-    resolve_database_path()
+        errors.append('SLACK_BOT_USER_ID')
+    try:
+        resolve_database_path()
+    except RuntimeError:
+        errors.append('DATABASE_PATH')
+    return tuple(sorted(set(errors)))
 
 
-_validate_runtime_configuration()
+def _validate_runtime_configuration():
+    """Raise for operators and tests while normal startup remains observable."""
+    errors = _runtime_configuration_errors()
+    if errors:
+        raise RuntimeError(
+            'Invalid runtime configuration: ' + ', '.join(errors)
+        )
+
+
+def _jwt_configuration_ready():
+    return bool(flask_app.secret_key) and len(str(flask_app.secret_key)) >= 32
+
+
+def _oauth_configuration_ready():
+    oauth_fields = {
+        'SECRET_KEY',
+        'CLIENT_ID',
+        'CLIENT_SECRET',
+        'OAUTH_SCOPE',
+        'EXPECTED_TEAM_ID',
+        'CLIENT_URL',
+        'OAUTH_REDIRECT_URI',
+    }
+    return not oauth_fields.intersection(_runtime_configuration_errors())
+
+
+_initial_configuration_errors = _runtime_configuration_errors()
+if _initial_configuration_errors:
+    logger.error(
+        'Runtime configuration is invalid fields=%s; affected routes will stay disabled',
+        ','.join(_initial_configuration_errors),
+    )
 
 
 def _validated_return_to(value):
@@ -232,20 +263,25 @@ def _health_payload(*, require_identity):
             conn.execute('SELECT 1').fetchone()
         finally:
             conn.close()
-    except sqlite3.Error:
+    except (sqlite3.Error, RuntimeError):
         return {
             'status': 'unhealthy',
             'version': APP_VERSION,
             'revision': APP_REVISION,
         }, 503
+    configuration_errors = _runtime_configuration_errors()
     identity_ready = bool(getattr(app, '_bot_identity_verified', False))
-    status = 'ready' if identity_ready else 'degraded'
-    code = 200 if identity_ready or not require_identity else 503
-    return {
+    fully_ready = identity_ready and not configuration_errors
+    status = 'ready' if fully_ready else 'degraded'
+    code = 200 if fully_ready or not require_identity else 503
+    payload = {
         'status': status,
         'version': APP_VERSION,
         'revision': APP_REVISION,
-    }, code
+    }
+    if configuration_errors:
+        payload['configuration'] = 'invalid'
+    return payload, code
 
 
 @flask_app.route('/healthz', methods=['GET'])
@@ -640,6 +676,8 @@ def singleflight_web_ai_job(job_name):
 
 @flask_app.route('/login')
 def login():
+    if not _oauth_configuration_ready():
+        return 'Authentication temporarily unavailable.', 503
     state = secrets.token_urlsafe(32)
     storage_key = secrets.token_urlsafe(32)
     return_to = _validated_return_to(request.args.get('return_to'))
@@ -664,6 +702,8 @@ def login():
 
 @flask_app.route('/oauth_callback')
 def oauth_callback():
+    if not _oauth_configuration_ready():
+        return 'Authentication temporarily unavailable.', 503
     code = request.args.get('code')
     supplied_state = request.args.get('state', '')
     oauth_request = session.pop('oauth_request', None)

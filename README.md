@@ -16,9 +16,12 @@ further back than 10,000 messages.
 
         uv sync
 
-   Copy `.env.example` to `.env` and replace every placeholder. Startup fails
-   deliberately when the OAuth configuration is incomplete, `EXPECTED_TEAM_ID`
-   is invalid, or `SECRET_KEY` has fewer than 32 characters.
+   Copy `.env.example` to `.env` and replace every placeholder. Invalid runtime
+   configuration is logged by field name (never by value): `/healthz` stays
+   available in degraded mode, `/readyz` stays unavailable, and OAuth/JWT routes
+   return 503 until the configuration is corrected. This keeps Slack event
+   handling and diagnostics observable during a bad rollout without weakening
+   authentication.
 
 3. If you want to include your existing slack messages, [export your team's slack history.](https://get.slack.help/hc/en-us/articles/201658943-Export-your-team-s-Slack-history)
 Download the archive and export it to a directory. Then run `import.py`
@@ -272,7 +275,7 @@ JWT and URL query. Use this staged order to avoid a login loop:
 
 1. deploy the frontend tag `v0.2.0-transition.1`, which accepts the signed legacy
    claim shape only long enough to remove it from the URL and cross the rollout;
-2. deploy backend `v2.2.0` and wait for `/healthz` plus `/readyz` to report the
+2. deploy backend `v2.2.1` and wait for `/healthz` plus `/readyz` to report the
    expected revision;
 3. deploy strict frontend `v0.2.0`, which rejects any JWT containing the legacy
    token claim;
