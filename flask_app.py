@@ -40,7 +40,7 @@ ADMIN_USERS = [
     'U011PN35BHT'
 ]
 
-DEFAULT_OPENAI_MODEL = "gpt-4o"
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
 
 def auth_required(f):
     @wraps(f)
@@ -587,8 +587,8 @@ def generate_podcast_content(formatted_messages):
                 {formatted_messages}
             """}
         ],
-        max_tokens=8192,
-        temperature=1.0,
+        max_completion_tokens=8192,
+        reasoning_effort="low",
     )
     
     return response.choices[0].message.content
@@ -703,8 +703,8 @@ def generate_digest():
 
                 {formatted_messages}"""}
         ],
-        max_tokens=16384,
-        temperature=0.7,
+        max_completion_tokens=16384,
+        reasoning_effort="medium",
     )
     
     summary = response.choices[0].message.content
@@ -791,8 +791,8 @@ def digest_details():
 
             Fornisci una risposta dettagliata, in italiano e in formato markdown."""}
         ],
-        max_tokens=4096,
-        temperature=0.7,
+        max_completion_tokens=4096,
+        reasoning_effort="medium",
     )
     
     details = response.choices[0].message.content
@@ -921,8 +921,8 @@ def chat():
             {"role": "system", "content": "Sei un assistente che risponde alle domande relative alle conversazioni di un workspace di Slack. Ti verranno passate delle conversazioni e una serie di domande a cui dovrai rispondere con precisione."},
             {"role": "user", "content": prompt}
         ],
-        max_tokens=4096,
-        temperature=0.7,
+        max_completion_tokens=4096,
+        reasoning_effort="medium",
     )
 
     ai_response = response.choices[0].message.content.strip()

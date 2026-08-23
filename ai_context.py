@@ -1,5 +1,8 @@
 import re
 
+MAX_CONTEXT_MESSAGE_CHARS = 2000
+MAX_CONTEXT_CHARS = 240_000
+
 
 def strip_bot_mention(text, bot_user_id):
     """Remove Slack bot mentions from a message while preserving the rest."""
@@ -31,14 +34,27 @@ def get_ai_context_scope(event):
 
 def format_messages_for_prompt(messages):
     """Format messaggi per il prompt LLM. Include user_id (se disponibile)
-    in modo che il modello possa generare mention Slack native `<@USER_ID>`."""
-    lines = []
-    for msg in messages:
+    in modo che il modello possa generare mention Slack native `<@USER_ID>`.
+
+    Il contesto è limitato e conserva i messaggi più recenti per evitare che un
+    canale molto lungo saturi la finestra del modello prima delle evidenze di
+    ricerca.
+    """
+    reversed_lines = []
+    used_chars = 0
+    for msg in reversed(messages):
         user = msg.get("user", "Unknown")
         uid = msg.get("user_id", "")
-        text = msg.get("text", "")
+        text = str(msg.get("text", "") or "").strip()
+        if len(text) > MAX_CONTEXT_MESSAGE_CHARS:
+            text = text[: MAX_CONTEXT_MESSAGE_CHARS - 1].rstrip() + "…"
         if uid:
-            lines.append(f"{user} (<@{uid}>): {text}")
+            line = f"{user} (<@{uid}>): {text}"
         else:
-            lines.append(f"{user}: {text}")
-    return "\n".join(lines)
+            line = f"{user}: {text}"
+        projected = used_chars + len(line) + (1 if reversed_lines else 0)
+        if projected > MAX_CONTEXT_CHARS:
+            break
+        reversed_lines.append(line)
+        used_chars = projected
+    return "\n".join(reversed(reversed_lines))

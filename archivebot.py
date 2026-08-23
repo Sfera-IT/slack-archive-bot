@@ -11,7 +11,9 @@ from datetime import datetime, timedelta
 from slack_bolt import App
 from openai import OpenAI
 
+from ai_agent import DEFAULT_AI_MODEL, run_archive_agent
 from ai_context import format_messages_for_prompt, get_ai_context_scope, is_engage_request
+from archive_search import ArchiveSearchEngine, EvidenceRegistry
 from utils import claim_xcancel_alert, db_connect, finalize_xcancel_alert, migrate_db
 from url_cleaner import UrlCleaner
 from xcancel import build_xcancel_response_text
@@ -26,12 +28,7 @@ from link_duplicates import (
     reconcile_edited_message_links,
     route_link_message_event,
 )
-from sferait_context import (
-    SFERAIT_SYSTEM_PROMPT,
-    get_recent_messages,
-    search_archive,
-    build_enhanced_prompt
-)
+from sferait_context import SFERAIT_SYSTEM_PROMPT
 
 # Admin users che possono eseguire comandi privilegiati (stessa lista di flask_app.py)
 ADMIN_USERS = [
@@ -104,7 +101,9 @@ TRASH_CHANNEL_NAMES = ["trash"]
 AUTO_ENGAGE_REPLY_THRESHOLD = 3       # reply count nel thread che triggera la decisione di engage
 AUTO_CLOWN_USER_REPLY_THRESHOLD = 8   # reply degli UTENTI nel thread engaged per valutare auto-clown
 AUTO_ENGAGE_COOLDOWN_SECONDS = 15 * 60  # cooldown globale tra nuovi engage nei canali auto-engage
-AUTO_ENGAGE_DECISION_MODEL = "gpt-4o-mini"
+AI_RESPONSE_MODEL = os.getenv("OPENAI_MODEL", DEFAULT_AI_MODEL)
+AI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "medium")
+AUTO_ENGAGE_DECISION_MODEL = os.getenv("OPENAI_DECISION_MODEL", AI_RESPONSE_MODEL)
 STOP_HINT_SUFFIX_TEMPLATE = "\n\n_per fermarmi: `<@{bot_id}> stop`_"
 ENGAGED_THREAD_STOP_ACTION_ID = "trash_stop_thread"  # legacy action_id: non cambiarlo, i bottoni esistenti lo usano.
 
@@ -1298,13 +1297,20 @@ def build_ai_context_messages(messages):
             if msg.get("user") and msg.get("user") != "USLACKBOT"
         })
         user_names = get_user_name_map(db_cursor, user_ids)
+        db_cursor.execute("SELECT user FROM optout UNION SELECT user FROM optout_ai")
+        ai_opted_out_users = {row[0] for row in db_cursor.fetchall()}
 
         formatted_messages = []
         for msg in messages:
             user_id = msg.get("user", "")
             text = (msg.get("text") or "").strip()
 
-            if not user_id or user_id == "USLACKBOT" or not text:
+            if (
+                not user_id
+                or user_id == "USLACKBOT"
+                or user_id in ai_opted_out_users
+                or not text
+            ):
                 continue
 
             formatted_messages.append({
@@ -1471,42 +1477,12 @@ def handle_app_mention(event, say):
                 f"gli ultimi {CHANNEL_RECAP_MESSAGE_LIMIT} messaggi visibili di questo canale Slack"
             )
 
-        if not context_messages:
-            say("Non ho trovato messaggi utili in questo contesto.", thread_ts=response_thread_ts)
-            return
-        
         logger.info(f"[AI] Found {len(context_messages)} messages for {context_scope} context")
 
-        formatted_messages = format_messages_for_prompt(context_messages)
-        
-        # === CONTESTO POTENZIATO SFERAIT ===
-        # 1. Recupera messaggi recenti per catturare lo "stile" della community
-        conn_ctx, cursor_ctx = db_connect(database_path)
-        recent_context = get_recent_messages(
-            conn_ctx, cursor_ctx, 
-            limit=30, 
-            exclude_channel=channel, 
-            hours=48
+        formatted_messages = format_messages_for_prompt(context_messages) or (
+            "(Nessun messaggio corrente disponibile; usa l'archivio se pertinente.)"
         )
-        logger.info(f"[AI] Retrieved {len(recent_context)} recent messages for ambient context")
 
-        # 2. Cerca nell'archivio messaggi rilevanti alla domanda
-        archive_results = search_archive(conn_ctx, cursor_ctx, text, limit=5)
-        logger.info(f"[AI] Found {len(archive_results)} relevant archive messages")
-        conn_ctx.close()
-
-        # 3. Usa il system prompt SferaIT (+ hint per le mention native)
-        system_prompt = SFERAIT_SYSTEM_PROMPT + MENTION_HINT_PROMPT
-
-        # 4. Costruisci prompt arricchito
-        user_prompt = build_enhanced_prompt(
-            thread_messages=f"Fonte contesto: {context_label}\n\n{formatted_messages}",
-            user_question=text,
-            recent_context=recent_context,
-            archive_results=archive_results
-        )
-        
-        # Chiama ChatGPT
         openai_api_key = os.environ.get("OPENAI_API_KEY")
         if not openai_api_key:
             logger.error("[AI] OPENAI_API_KEY not set")
@@ -1515,47 +1491,35 @@ def handle_app_mention(event, say):
         
         client = OpenAI(api_key=openai_api_key)
         
-        logger.info(f"[AI] Sending request to OpenAI with {len(context_messages)} messages")
-        
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=2000,
-            temperature=0.7,
+        logger.info(
+            f"[AI] Starting bounded archive agent with model {AI_RESPONSE_MODEL} "
+            f"and {len(context_messages)} current-context messages"
         )
-        
-        ai_response = response.choices[0].message.content.strip()
-        
-        logger.info(f"[AI] Received response from OpenAI, length: {len(ai_response)}")
-        
-        # Recupera le informazioni sul throttle corrente per aggiungerle alla risposta
-        conn_throttle, cursor_throttle = db_connect(database_path)
-        now = datetime.now()
-        one_minute_ago_timestamp = (now - timedelta(minutes=1)).timestamp()
-        one_hour_ago_timestamp = (now - timedelta(hours=1)).timestamp()
-        
-        cursor_throttle.execute(
-            "SELECT COUNT(*) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
-            (one_minute_ago_timestamp, user_id)
-        )
-        current_minute_count = cursor_throttle.fetchone()[0]
-        
-        cursor_throttle.execute(
-            "SELECT COUNT(*) FROM ai_requests WHERE timestamp > ? AND user_id = ?",
-            (one_hour_ago_timestamp, user_id)
-        )
-        current_hour_count = cursor_throttle.fetchone()[0]
-        
-        conn_throttle.close()
-        
-        # Aggiungi la riga con i rate limit alla risposta
-        rate_limit_info = f"\n\n_📊 Rate limit per user: {current_minute_count}/2 al minuto, {current_hour_count}/10 all'ora_"
-        final_response = ai_response + rate_limit_info
-        
-        logger.info(f"[AI] Added rate limit info: {current_minute_count}/2 per minuto, {current_hour_count}/10 per ora")
+        conn_ctx, _ = db_connect(database_path)
+        try:
+            evidence = EvidenceRegistry()
+            search_engine = ArchiveSearchEngine(
+                conn_ctx,
+                requester_user_id=user_id,
+                current_channel_id=channel,
+                before_timestamp=message_ts,
+                evidence=evidence,
+            )
+            final_response = run_archive_agent(
+                client,
+                question=text,
+                current_context=(
+                    f"Fonte contesto corrente: {context_label}\n\n{formatted_messages}"
+                    + MENTION_HINT_PROMPT
+                ),
+                search_engine=search_engine,
+                model=AI_RESPONSE_MODEL,
+                reasoning_effort=AI_REASONING_EFFORT,
+            )
+        finally:
+            conn_ctx.close()
+
+        logger.info(f"[AI] Received grounded response, length: {len(final_response)}")
         
         # Rispondi nel thread
         say(final_response, thread_ts=response_thread_ts)
@@ -1694,8 +1658,8 @@ def _decide_engage(thread_messages, openai_client):
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
         ],
-        max_tokens=600,
-        temperature=0.8,
+        max_completion_tokens=600,
+        reasoning_effort="low",
         response_format={"type": "json_object"},
     )
     raw = resp.choices[0].message.content or "{}"
@@ -1732,8 +1696,8 @@ def _decide_clown(thread_messages, openai_client):
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
         ],
-        max_tokens=300,
-        temperature=0.5,
+        max_completion_tokens=300,
+        reasoning_effort="low",
         response_format={"type": "json_object"},
     )
     raw = resp.choices[0].message.content or "{}"
@@ -1928,42 +1892,45 @@ def _should_reply_now(thread_messages, bot_user_id):
 
 
 def _auto_reply_in_thread(channel, thread_ts, thread_messages, openai_client, say):
-    """Risposta del bot in un thread già engaged. Usa SFERAIT_SYSTEM_PROMPT.
-    Costruisce la sequenza messaggi role-based (assistant per i propri reply)
-    per evitare che il modello si auto-citi prefissando con il proprio nome."""
+    """Reply in an engaged thread through the same grounded archive agent."""
     bot_user_id = app._bot_user_id
-
-    chat_messages = [
-        {"role": "system", "content": SFERAIT_SYSTEM_PROMPT + MENTION_HINT_PROMPT}
-    ]
-    for m in thread_messages:
-        text = m.get("text", "")
-        if not text:
-            continue
-        if m.get("user_id") == bot_user_id:
-            chat_messages.append({"role": "assistant", "content": text})
-        else:
-            user = m.get("user", "Unknown")
-            uid = m.get("user_id", "")
-            content = f"{user} (<@{uid}>): {text}" if uid else f"{user}: {text}"
-            chat_messages.append({"role": "user", "content": content})
-
-    chat_messages.append({
-        "role": "user",
-        "content": (
-            "Continua la conversazione con UN solo messaggio, breve e in tono. "
-            "Non prefissare la risposta con il tuo nome utente. "
-            "Scrivi direttamente il contenuto come se stessi parlando in chat."
+    latest_user_message = next(
+        (
+            message
+            for message in reversed(thread_messages)
+            if message.get("user_id") and message.get("user_id") != bot_user_id
         ),
-    })
-
-    resp = openai_client.chat.completions.create(
-        model="gpt-4o",
-        messages=chat_messages,
-        max_tokens=800,
-        temperature=0.8,
+        None,
     )
-    reply = (resp.choices[0].message.content or "").strip()
+    if latest_user_message is None:
+        return
+
+    formatted_messages = format_messages_for_prompt(thread_messages)
+    evidence = EvidenceRegistry()
+    conn, _ = db_connect(database_path)
+    try:
+        search_engine = ArchiveSearchEngine(
+            conn,
+            requester_user_id=latest_user_message.get("user_id", ""),
+            current_channel_id=channel,
+            before_timestamp=latest_user_message.get("ts"),
+            evidence=evidence,
+        )
+        reply = run_archive_agent(
+            openai_client,
+            question=latest_user_message.get("text", ""),
+            current_context=(
+                "Fonte contesto corrente: thread Slack ingaggiato\n\n"
+                + formatted_messages
+                + MENTION_HINT_PROMPT
+            ),
+            search_engine=search_engine,
+            model=AI_RESPONSE_MODEL,
+            reasoning_effort=AI_REASONING_EFFORT,
+        )
+    finally:
+        conn.close()
+
     reply = _strip_bot_self_prefix(reply)
     if reply:
         _say_engaged_thread_reply(say, reply, channel, thread_ts)
