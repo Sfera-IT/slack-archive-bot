@@ -12,6 +12,7 @@ from sferait_context import SFERAIT_SYSTEM_PROMPT
 
 DEFAULT_AI_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "medium"
+CHAT_TOOL_REASONING_EFFORT = "none"
 MAX_SEARCH_ROUNDS = 6
 MAX_TOOL_CALLS = 8
 MAX_OUTPUT_TOKENS = 3000
@@ -147,6 +148,7 @@ def run_archive_agent(
     reasoning_effort = reasoning_effort or os.getenv(
         "OPENAI_REASONING_EFFORT", DEFAULT_REASONING_EFFORT
     )
+    reasoning_effort = chat_tool_reasoning_effort(model, reasoning_effort)
     messages = [
         {"role": "system", "content": SFERAIT_SYSTEM_PROMPT},
         {
@@ -332,6 +334,18 @@ def _finalize_answer(
                 "quindi non posso confermare la conversazione richiesta."
             )
     return render_sources(answer, evidence)
+
+
+def chat_tool_reasoning_effort(model: str, configured_effort: str) -> str:
+    """Return an effort accepted by Chat Completions function tools.
+
+    GPT-5.6 rejects function tools combined with reasoning effort other than
+    ``none`` on ``/v1/chat/completions``. Keep this compatibility shim local to
+    the tool loop; the configured effort remains available to other workloads.
+    """
+    if model.strip().lower().startswith("gpt-5.6"):
+        return CHAT_TOOL_REASONING_EFFORT
+    return configured_effort
 
 
 def _dispatch_tool(search_engine: ArchiveSearchEngine, tool_call) -> dict:

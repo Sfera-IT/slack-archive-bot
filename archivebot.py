@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from slack_bolt import App
 from openai import OpenAI
 
-from ai_agent import DEFAULT_AI_MODEL, run_archive_agent
+from ai_agent import DEFAULT_AI_MODEL, chat_tool_reasoning_effort, run_archive_agent
 from ai_context import format_messages_for_prompt, get_ai_context_scope, is_engage_request
 from ai_diagnostics import new_ai_error_id, send_private_ai_error
 from archive_search import ArchiveSearchEngine, EvidenceRegistry
@@ -1535,10 +1535,12 @@ def handle_app_mention(event, say):
                 send_private_ai_error(
                     app.client,
                     e,
-                    event=event,
-                    model=AI_RESPONSE_MODEL,
-                    reasoning_effort=AI_REASONING_EFFORT,
-                    error_id=error_id,
+                        event=event,
+                        model=AI_RESPONSE_MODEL,
+                        reasoning_effort=chat_tool_reasoning_effort(
+                            AI_RESPONSE_MODEL, AI_REASONING_EFFORT
+                        ),
+                        error_id=error_id,
                 )
                 debug_sent = True
             except Exception as debug_error:
