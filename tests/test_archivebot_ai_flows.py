@@ -37,6 +37,7 @@ class FakeSlackApp:
     event = _decorator
     message = _decorator
     action = _decorator
+    command = _decorator
 
 
 @pytest.fixture
@@ -64,7 +65,7 @@ def test_private_debug_command_is_admin_only_and_toggles_from_disabled(
     conn, cursor = bot.db_connect(bot.database_path)
     try:
         bot.handle_query(
-            {"text": "/debug", "user": bot.ADMIN_USERS[0]},
+            {"text": "debug", "user": bot.ADMIN_USERS[0]},
             cursor,
             replies.append,
         )
@@ -85,6 +86,28 @@ def test_private_debug_command_is_admin_only_and_toggles_from_disabled(
             replies.append,
         )
         assert "Solo gli amministratori" in replies[-1]
+    finally:
+        conn.close()
+
+
+def test_native_debug_slash_command_acks_and_uses_same_opt_in_state(
+    archivebot_module,
+):
+    bot = archivebot_module
+    acknowledgements = []
+    replies = []
+
+    bot.handle_ai_debug_slash_command(
+        lambda: acknowledgements.append(True),
+        {"user_id": bot.ADMIN_USERS[0], "text": "on"},
+        replies.append,
+    )
+
+    assert acknowledgements == [True]
+    assert "attivato" in replies[-1]
+    conn, cursor = bot.db_connect(bot.database_path)
+    try:
+        assert bot.is_ai_debug_enabled(cursor, bot.ADMIN_USERS[0])
     finally:
         conn.close()
 

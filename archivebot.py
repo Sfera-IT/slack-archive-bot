@@ -383,41 +383,67 @@ def remove_clown_user(conn, cursor, nickname_lower):
     logger.info(f"[CLOWN] Removed {nickname_lower} from clown list in DB")
 
 
+def _handle_ai_debug_command(text, user_id, cursor, reply):
+    """Handle admin-only AI debug opt-in from a DM or native slash command."""
+    debug_match = re.fullmatch(
+        r"/?debug(?:\s+(on|off|status))?",
+        (text or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    if not debug_match:
+        return False
+
+    if user_id not in ADMIN_USERS:
+        logger.warning("[AI][DEBUG] Non-admin user %s attempted debug opt-in", user_id)
+        reply("❌ Solo gli amministratori possono ricevere il debug AI privato.")
+        return True
+
+    action = (debug_match.group(1) or "toggle").lower()
+    currently_enabled = is_ai_debug_enabled(cursor, user_id)
+    if action == "status":
+        state = "attivo" if currently_enabled else "disattivato"
+        reply(f"🛠️ Debug AI privato: *{state}*.")
+        return True
+
+    enabled = not currently_enabled if action == "toggle" else action == "on"
+    set_ai_debug_enabled(cursor, user_id, enabled)
+    cursor.connection.commit()
+    if enabled:
+        reply(
+            "🛠️ Debug AI privato attivato. Riceverai gli errori sanitizzati "
+            "di menzioni, ricerche ed engage. Invia `debug off` in DM per disattivarlo."
+        )
+    else:
+        reply("🛠️ Debug AI privato disattivato.")
+    return True
+
+
+@app.command("/debug")
+def handle_ai_debug_slash_command(ack, command, respond):
+    """Handle the optional native Slack /debug command when configured in the app."""
+    ack()
+    user_id = command.get("user_id", "unknown")
+    command_text = "debug"
+    if (arguments := (command.get("text") or "").strip()):
+        command_text += f" {arguments}"
+
+    conn, cursor = db_connect(database_path)
+    try:
+        if not _handle_ai_debug_command(command_text, user_id, cursor, respond):
+            respond("Uso: `/debug [on|off|status]`.")
+    finally:
+        conn.close()
+
+
 def handle_query(event, cursor, say):
     text = event.get("text", "").strip()
     user_id = event.get("user", "unknown")
     
     logger.info(f"[CLOWN] Received DM from user {user_id}, text: '{text}'")
 
-    # Debug AI privato: opt-in esplicito e riservato agli amministratori.
-    debug_match = re.fullmatch(
-        r"/debug(?:\s+(on|off|status))?",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if debug_match:
-        if user_id not in ADMIN_USERS:
-            logger.warning("[AI][DEBUG] Non-admin user %s attempted /debug", user_id)
-            say("❌ Solo gli amministratori possono ricevere il debug AI privato.")
-            return
-
-        action = (debug_match.group(1) or "toggle").lower()
-        currently_enabled = is_ai_debug_enabled(cursor, user_id)
-        if action == "status":
-            state = "attivo" if currently_enabled else "disattivato"
-            say(f"🛠️ Debug AI privato: *{state}*.")
-            return
-
-        enabled = not currently_enabled if action == "toggle" else action == "on"
-        set_ai_debug_enabled(cursor, user_id, enabled)
-        cursor.connection.commit()
-        if enabled:
-            say(
-                "🛠️ Debug AI privato attivato. Riceverai gli errori sanitizzati "
-                "di menzioni, ricerche ed engage. Invia di nuovo `/debug` per disattivarlo."
-            )
-        else:
-            say("🛠️ Debug AI privato disattivato.")
+    # Il testo senza slash funziona sempre in DM. /debug resta supportato quando
+    # Slack lo consegna come messaggio invece che come Slash Command nativo.
+    if _handle_ai_debug_command(text, user_id, cursor, say):
         return
     
     # Gestisci comando /clown
