@@ -1,6 +1,6 @@
 [project]
 name = "slack-archive-bot"
-version = "2.2.3"
+version = "2.2.4"
 description = "A Slack archive search bot."
 readme = "README.md"
 requires-python = ">=3.11"
