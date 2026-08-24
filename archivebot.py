@@ -293,6 +293,7 @@ def update_channels(conn, cursor):
 
     channel_args = []
     member_args = []
+    refreshed_channel_ids = []
     for channel in channels:
         if channel["is_member"]:
             channel_id, channel_name, channel_is_private, members = get_channel_info(
@@ -300,13 +301,28 @@ def update_channels(conn, cursor):
             )
 
             channel_args.append((channel_name, channel_id, channel_is_private))
-
-            member_args += members
+            refreshed_channel_ids.append((channel_id,))
+            member_args.extend(members)
 
     cursor.executemany(
-        "INSERT INTO channels(name, id, is_private) VALUES(?,?,?)", channel_args
+        """
+        INSERT INTO channels(name, id, is_private) VALUES(?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            is_private = excluded.is_private
+        """,
+        channel_args,
     )
-    cursor.executemany("INSERT INTO members(channel, user) VALUES(?,?)", member_args)
+    # Refresh each channel atomically instead of appending the same members on
+    # every boot. Production databases may enforce UNIQUE(channel, user), while
+    # older databases otherwise accumulate duplicate rows indefinitely.
+    cursor.executemany(
+        "DELETE FROM members WHERE channel = ?", refreshed_channel_ids
+    )
+    cursor.executemany(
+        "INSERT INTO members(channel, user) VALUES(?, ?)",
+        sorted(set(member_args)),
+    )
     conn.commit()
 
 
@@ -2999,16 +3015,23 @@ def handle_channel_created(event):
 def init():
     # Initialize the DB if it doesn't exist
     conn, cursor = db_connect(database_path)
-    migrate_db(conn, cursor)
-    logger.info("Database migrated")
-
-    # Update the users and channels in the DB and in the local memory mapping
     try:
-        update_users(conn, cursor)
-        update_channels(conn, cursor)
-    except Exception as e:
-        logger.error("Error updating users and channels: %s" % e)
-    
+        migrate_db(conn, cursor)
+        logger.info("Database migrated")
+
+        # Update the users and channels in the DB and in the local memory mapping
+        try:
+            update_users(conn, cursor)
+            update_channels(conn, cursor)
+        except Exception:
+            # A failed executemany leaves SQLite inside a write transaction.
+            # Roll it back before Gunicorn forks, then always close the master
+            # connection so workers cannot inherit a writer lock.
+            conn.rollback()
+            logger.exception("Error updating users and channels")
+    finally:
+        conn.close()
+
     # Log stato iniziale della lista clown
     logger.info(f"[CLOWN] Bot initialized. Clown list is empty (will be populated via DM commands)")
 

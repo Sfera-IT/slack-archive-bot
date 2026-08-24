@@ -69,6 +69,80 @@ def test_import_does_not_call_slack_api(archivebot_module):
     assert archivebot_module.app._bot_user_id
 
 
+def test_update_channels_replaces_existing_memberships(archivebot_module, monkeypatch):
+    bot = archivebot_module
+    conn, cursor = bot.db_connect(bot.database_path)
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_members_channel_user "
+        "ON members(channel, user)"
+    )
+    cursor.execute(
+        "INSERT INTO channels(name, id, is_private) VALUES (?, ?, ?)",
+        ("old-name", "C1", False),
+    )
+    cursor.execute(
+        "INSERT INTO members(channel, user) VALUES (?, ?)",
+        ("C1", "U1"),
+    )
+    conn.commit()
+
+    bot.app.client.conversations_list = lambda **_kwargs: {
+        "channels": [{"id": "C1", "is_member": True}]
+    }
+    snapshots = [
+        ("C1", "new-name", False, [("C1", "U1"), ("C1", "U2")]),
+        ("C1", "newest-name", False, [("C1", "U2"), ("C1", "U3")]),
+    ]
+    monkeypatch.setattr(bot, "get_channel_info", lambda _channel_id: snapshots.pop(0))
+
+    bot.update_channels(conn, cursor)
+    bot.update_channels(conn, cursor)
+
+    assert cursor.execute(
+        "SELECT name FROM channels WHERE id = 'C1'"
+    ).fetchone() == ("newest-name",)
+    assert cursor.execute(
+        "SELECT channel, user FROM members ORDER BY channel, user"
+    ).fetchall() == [("C1", "U2"), ("C1", "U3")]
+    conn.close()
+
+
+def test_init_rolls_back_and_closes_failed_refresh_connection(
+    archivebot_module, monkeypatch
+):
+    bot = archivebot_module
+    original_db_connect = bot.db_connect
+    opened_connections = []
+
+    def tracked_db_connect(database_path):
+        conn, cursor = original_db_connect(database_path)
+        opened_connections.append(conn)
+        return conn, cursor
+
+    def failing_channel_refresh(_conn, cursor):
+        cursor.execute(
+            "INSERT INTO channels(name, id, is_private) VALUES (?, ?, ?)",
+            ("temporary", "C-LOCK", False),
+        )
+        raise RuntimeError("channel refresh failed")
+
+    monkeypatch.setattr(bot, "db_connect", tracked_db_connect)
+    monkeypatch.setattr(bot, "update_users", lambda _conn, _cursor: None)
+    monkeypatch.setattr(bot, "update_channels", failing_channel_refresh)
+
+    bot.init()
+
+    with sqlite3.connect(bot.database_path, timeout=0.05) as second_conn:
+        second_conn.execute("BEGIN IMMEDIATE")
+        assert second_conn.execute(
+            "SELECT COUNT(*) FROM channels WHERE id = 'C-LOCK'"
+        ).fetchone() == (0,)
+        second_conn.rollback()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        opened_connections[0].execute("SELECT 1")
+
+
 def test_private_debug_command_is_admin_only_and_toggles_from_disabled(
     archivebot_module,
 ):
