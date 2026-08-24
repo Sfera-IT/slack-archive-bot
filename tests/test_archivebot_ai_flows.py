@@ -2,7 +2,7 @@ import importlib
 import os
 import sqlite3
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -67,6 +67,35 @@ def archivebot_module(monkeypatch, tmp_path):
 def test_import_does_not_call_slack_api(archivebot_module):
     assert archivebot_module.app.client.auth_calls == 0
     assert archivebot_module.app._bot_user_id
+
+
+def test_healthz_is_public_and_does_not_require_runtime_dependencies(
+    archivebot_module, monkeypatch
+):
+    flask_adapter = ModuleType("slack_bolt.adapter.flask")
+
+    class FakeSlackRequestHandler:
+        def __init__(self, app):
+            self.app = app
+
+        def handle(self, _request):
+            return "", 200
+
+    flask_adapter.SlackRequestHandler = FakeSlackRequestHandler
+    monkeypatch.setitem(sys.modules, "slack_bolt.adapter", ModuleType("slack_bolt.adapter"))
+    monkeypatch.setitem(sys.modules, "slack_bolt.adapter.flask", flask_adapter)
+    monkeypatch.setitem(sys.modules, "archivebot", archivebot_module)
+    sys.modules.pop("flask_app", None)
+
+    web = importlib.import_module("flask_app")
+    try:
+        response = web.flask_app.test_client().get("/healthz")
+
+        assert response.status_code == 200
+        assert response.get_json() == {"status": "ok"}
+        assert response.headers["Cache-Control"] == "no-store"
+    finally:
+        sys.modules.pop("flask_app", None)
 
 
 def test_update_channels_replaces_existing_memberships(archivebot_module, monkeypatch):
