@@ -42,6 +42,31 @@ def migrate_db(conn, cursor):
         )
     """
     )
+
+    # Membership is a set. v2.2.0 already made this index UNIQUE in production,
+    # while rollback-era fresh databases recreated it as non-unique. Normalize
+    # only when needed so normal boots do not repeat DDL or data rewrites.
+    member_indexes = {
+        row[1]: bool(row[2])
+        for row in cursor.execute("PRAGMA index_list('members')").fetchall()
+    }
+    if not member_indexes.get("idx_members_channel_user", False):
+        cursor.execute(
+            """
+            DELETE FROM members
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM members GROUP BY channel, user
+            )
+            """
+        )
+        if "idx_members_channel_user" in member_indexes:
+            cursor.execute("DROP INDEX idx_members_channel_user")
+        cursor.execute(
+            """
+            CREATE UNIQUE INDEX idx_members_channel_user
+            ON members(channel, user)
+            """
+        )
     conn.commit()
 
     # Add `is_private` to channels for dbs that existed in v0.1
@@ -117,10 +142,6 @@ def migrate_db(conn, cursor):
         CREATE INDEX IF NOT EXISTS idx_messages_embedded_timestamp
         ON messages(timestamp)
         WHERE embeddings IS NOT NULL
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS idx_members_channel_user
-        ON members(channel, user)
         """,
     ]:
         try:

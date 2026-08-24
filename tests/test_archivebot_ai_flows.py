@@ -136,6 +136,61 @@ def test_update_channels_replaces_existing_memberships(archivebot_module, monkey
     conn.close()
 
 
+def test_member_joined_channel_retry_is_idempotent(archivebot_module):
+    bot = archivebot_module
+    event = {"channel": "C1", "user": "U1"}
+
+    bot.handle_join(event)
+    bot.handle_join(event)
+
+    conn = sqlite3.connect(bot.database_path)
+    try:
+        assert conn.execute(
+            "SELECT channel, user FROM members"
+        ).fetchall() == [("C1", "U1")]
+    finally:
+        conn.close()
+
+
+def test_bot_join_refreshes_channel_membership_snapshot(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    conn = sqlite3.connect(bot.database_path)
+    conn.execute(
+        "INSERT INTO channels(name, id, is_private) VALUES ('old', 'C1', 0)"
+    )
+    conn.execute("INSERT INTO members(channel, user) VALUES ('C1', 'USTALE')")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        bot,
+        "get_channel_info",
+        lambda _channel: (
+            "C1",
+            "new",
+            False,
+            [("C1", "U1"), ("C1", "U1"), ("C1", "U2")],
+        ),
+    )
+
+    event = {"channel": "C1", "user": bot.app._bot_user_id}
+    bot.handle_join(event)
+    bot.handle_join(event)
+
+    conn = sqlite3.connect(bot.database_path)
+    try:
+        assert conn.execute(
+            "SELECT name FROM channels WHERE id = 'C1'"
+        ).fetchone() == ("new",)
+        assert conn.execute(
+            "SELECT channel, user FROM members ORDER BY user"
+        ).fetchall() == [("C1", "U1"), ("C1", "U2")]
+    finally:
+        conn.close()
+
+
 def test_init_rolls_back_and_closes_failed_refresh_connection(
     archivebot_module, monkeypatch
 ):
@@ -279,6 +334,104 @@ def test_rate_limit_footer_is_visible_and_counts_the_accepted_request(
         conn.close()
 
 
+def test_auto_engage_decision_uses_responses_helper_contract(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    calls = []
+
+    def fake_generate(client, **kwargs):
+        calls.append((client, kwargs))
+        return '{"engage": true, "reply": "bot: risposta"}'
+
+    monkeypatch.setattr(bot, "generate_text_response", fake_generate)
+    client = object()
+
+    engage, reply = bot._decide_engage(
+        [{"user": "Alice", "user_id": "U1", "text": "ciao", "ts": "1"}],
+        client,
+    )
+
+    assert engage is True
+    assert reply == "risposta"
+    assert calls[0][0] is client
+    assert calls[0][1]["model"] == bot.AUTO_ENGAGE_DECISION_MODEL
+    assert calls[0][1]["reasoning_effort"] == "low"
+    assert calls[0][1]["max_output_tokens"] == 600
+    assert calls[0][1]["text_format"] == {"type": "json_object"}
+
+
+def test_auto_clown_decision_uses_responses_helper_contract(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    calls = []
+
+    def fake_generate(client, **kwargs):
+        calls.append((client, kwargs))
+        return '{"clown_user": "Alice", "reason": "autogol"}'
+
+    monkeypatch.setattr(bot, "generate_text_response", fake_generate)
+    client = object()
+
+    user, reason = bot._decide_clown(
+        [{"user": "Alice", "user_id": "U1", "text": "ciao", "ts": "1"}],
+        client,
+    )
+
+    assert (user, reason) == ("Alice", "autogol")
+    assert calls[0][0] is client
+    assert calls[0][1]["model"] == bot.AUTO_ENGAGE_DECISION_MODEL
+    assert calls[0][1]["reasoning_effort"] == "low"
+    assert calls[0][1]["max_output_tokens"] == 300
+    assert calls[0][1]["text_format"] == {"type": "json_object"}
+
+
+def test_direct_mention_keeps_responses_agent_request_and_rate_footer(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    captured = {}
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+    monkeypatch.setattr(
+        bot,
+        "get_channel_messages",
+        lambda *_args, **_kwargs: [
+            {"user": "Alice", "user_id": "U1", "text": "contesto", "ts": "100.1"}
+        ],
+    )
+    monkeypatch.setattr(bot, "OpenAI", lambda **_kwargs: object())
+
+    def fake_run_archive_agent(_client, **kwargs):
+        captured.update(kwargs)
+        return "risposta grounded"
+
+    monkeypatch.setattr(bot, "run_archive_agent", fake_run_archive_agent)
+    replies = []
+
+    bot.handle_app_mention(
+        {
+            "user": "U1",
+            "channel": "C1",
+            "ts": "100.2",
+            "text": f"<@{bot.app._bot_user_id}> cosa abbiamo deciso?",
+        },
+        lambda text, **kwargs: replies.append((text, kwargs)),
+    )
+
+    assert captured["question"] == "cosa abbiamo deciso?"
+    assert captured["search_engine"].requester_user_id == "U1"
+    assert captured["search_engine"].before_timestamp == "100.2"
+    assert captured["model"] == bot.AI_RESPONSE_MODEL
+    assert captured["reasoning_effort"] == bot.AI_REASONING_EFFORT
+    assert replies[0][1]["thread_ts"] == "100.2"
+    assert "risposta grounded" in replies[0][0]
+    assert "1/2 al minuto, 1/10 all'ora" in replies[0][0]
+
+
 def _seed_engaged_thread(bot):
     conn = sqlite3.connect(bot.database_path)
     conn.execute(
@@ -333,6 +486,204 @@ def test_engage_claims_each_event_once_and_runs_the_ai_reply(
     ).fetchone()
     conn.close()
     assert row == ("100.2",)
+
+
+def test_engage_passes_live_trigger_when_archive_optout_removes_all_context(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    _seed_engaged_thread(bot)
+    conn = sqlite3.connect(bot.database_path)
+    conn.execute("INSERT INTO optout(user, timestamp) VALUES ('U1', 'now')")
+    conn.commit()
+    conn.close()
+    calls = []
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+    monkeypatch.setattr(bot, "get_thread_messages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(bot, "OpenAI", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        bot,
+        "_auto_reply_in_thread",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    message = {
+        "user": "U1",
+        "channel": "C1",
+        "channel_type": "channel",
+        "thread_ts": "100.1",
+        "ts": "100.2",
+        "text": "questa richiesta non deve essere archiviata",
+    }
+
+    bot.maybe_reply_to_engaged_thread(message, lambda *_args, **_kwargs: None)
+
+    assert len(calls) == 1
+    assert calls[0][1]["trigger_message"] is message
+    conn = sqlite3.connect(bot.database_path)
+    try:
+        assert conn.execute(
+            "SELECT user_id FROM ai_requests"
+        ).fetchall() == [("U1",)]
+        assert conn.execute(
+            "SELECT last_reply_ts FROM engaged_threads "
+            "WHERE thread_ts = '100.1' AND channel = 'C1'"
+        ).fetchone() == ("100.2",)
+    finally:
+        conn.close()
+
+
+def test_auto_reply_uses_trigger_instead_of_latest_visible_context_author(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    captured = {}
+    conn = sqlite3.connect(bot.database_path)
+    conn.execute("INSERT INTO users(name, id, avatar) VALUES ('Alice', 'U1', '')")
+    conn.execute("INSERT INTO users(name, id, avatar) VALUES ('Bob', 'U2', '')")
+    conn.execute("INSERT INTO channels(name, id, is_private) VALUES ('dev', 'C1', 0)")
+    conn.commit()
+    conn.close()
+
+    def fake_run_archive_agent(_client, **kwargs):
+        captured.update(kwargs)
+        return "risposta"
+
+    monkeypatch.setattr(bot, "run_archive_agent", fake_run_archive_agent)
+    replies = []
+    trigger = {
+        "user": "U1",
+        "text": "domanda corrente",
+        "ts": "100.3",
+    }
+
+    bot._auto_reply_in_thread(
+        "C1",
+        "100.1",
+        [{"user": "Bob", "user_id": "U2", "text": "testo precedente", "ts": "100.2"}],
+        object(),
+        lambda *args, **kwargs: replies.append((args, kwargs)),
+        trigger_message=trigger,
+    )
+
+    assert captured["question"] == "domanda corrente"
+    assert captured["search_engine"].requester_user_id == "U1"
+    assert captured["search_engine"].before_timestamp == "100.3"
+    assert replies
+
+
+def test_engage_ai_optout_is_explicit_and_consumes_no_claim_or_quota(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    _seed_engaged_thread(bot)
+    conn = sqlite3.connect(bot.database_path)
+    conn.execute("INSERT INTO optout_ai(user, timestamp) VALUES ('U1', 'now')")
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+    generated = []
+    monkeypatch.setattr(
+        bot,
+        "_auto_reply_in_thread",
+        lambda *_args, **_kwargs: generated.append(True),
+    )
+    replies = []
+
+    bot.maybe_reply_to_engaged_thread(
+        {
+            "user": "U1",
+            "channel": "C1",
+            "thread_ts": "100.1",
+            "ts": "100.2",
+            "text": "non usare le funzioni AI",
+        },
+        lambda text, **kwargs: replies.append((text, kwargs)),
+    )
+
+    assert generated == []
+    assert len(replies) == 1
+    assert "opt-out AI" in replies[0][0]
+    assert replies[0][1]["thread_ts"] == "100.1"
+    conn = sqlite3.connect(bot.database_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM ai_requests").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT last_reply_ts FROM engaged_threads "
+            "WHERE thread_ts = '100.1' AND channel = 'C1'"
+        ).fetchone() == ("100.1",)
+    finally:
+        conn.close()
+
+
+def test_archive_optout_redacts_storage_but_preserves_live_engage_trigger(
+    archivebot_module,
+    monkeypatch,
+):
+    bot = archivebot_module
+    conn = sqlite3.connect(bot.database_path)
+    conn.execute("INSERT INTO users(name, id, avatar) VALUES ('Alice', 'U1', '')")
+    conn.execute("INSERT INTO channels(name, id, is_private) VALUES ('dev', 'C1', 0)")
+    conn.execute("INSERT INTO optout(user, timestamp) VALUES ('U1', 'now')")
+    conn.commit()
+    conn.close()
+    routed = []
+    routed_links = []
+    monkeypatch.setattr(
+        bot,
+        "route_link_message_event",
+        lambda *_args, **_kwargs: routed_links.append(True),
+    )
+    monkeypatch.setattr(
+        bot.app.client,
+        "chat_getPermalink",
+        lambda **_kwargs: {"permalink": "https://slack.example/private-pointer"},
+        raising=False,
+    )
+    monkeypatch.setattr(bot, "create_embeddings", lambda _text: None)
+    monkeypatch.setattr(
+        bot,
+        "maybe_reply_to_engaged_thread",
+        lambda message, say: routed.append(message.copy()),
+    )
+    monkeypatch.setattr(bot, "post_xcancel_alternatives", lambda *_args, **_kwargs: None)
+
+    bot.handle_message(
+        {
+            "user": "U1",
+            "channel": "C1",
+            "channel_type": "channel",
+            "thread_ts": "100.1",
+            "ts": "100.2",
+            "text": "contenuto live",
+        },
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert routed == [
+        {
+            "user": "U1",
+            "channel": "C1",
+            "channel_type": "channel",
+            "thread_ts": "100.1",
+            "ts": "100.2",
+            "text": "contenuto live",
+        }
+    ]
+    assert routed_links == []
+    conn = sqlite3.connect(bot.database_path)
+    try:
+        assert conn.execute(
+            "SELECT message, user, permalink FROM messages WHERE timestamp = '100.2'"
+        ).fetchone() == (
+            "User opted out of archiving. This message has been deleted",
+            "USLACKBOT",
+            "",
+        )
+    finally:
+        conn.close()
 
 
 def test_message_replied_wrapper_routes_reply_to_engage(

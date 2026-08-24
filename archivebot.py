@@ -1094,13 +1094,22 @@ def handle_join(event):
                 event["channel"]
             )
             cursor.execute(
-                "INSERT INTO channels(name, id, is_private) VALUES(?,?,?)",
+                """
+                INSERT INTO channels(name, id, is_private) VALUES(?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    is_private = excluded.is_private
+                """,
                 (channel_name, channel_id, channel_is_private),
             )
-            cursor.executemany("INSERT INTO members(channel, user) VALUES(?,?)", members)
+            cursor.execute("DELETE FROM members WHERE channel = ?", (channel_id,))
+            cursor.executemany(
+                "INSERT OR IGNORE INTO members(channel, user) VALUES(?, ?)",
+                sorted(set(members)),
+            )
         else:
             cursor.execute(
-                "INSERT INTO members(channel, user) VALUES(?,?)",
+                "INSERT OR IGNORE INTO members(channel, user) VALUES(?, ?)",
                 (event["channel"], event["user"]),
             )
         conn.commit()
@@ -1170,6 +1179,17 @@ def handle_user_change(event):
         conn.close()
 
 
+def _archive_optout_enabled(user_id):
+    if not user_id:
+        return False
+    conn, cursor = db_connect(database_path)
+    try:
+        cursor.execute("SELECT 1 FROM optout WHERE user = ? LIMIT 1", (user_id,))
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
+
+
 def handle_message(message, say):
     _initialize_bot_identity()
     logger.debug(message)
@@ -1191,16 +1211,17 @@ def handle_message(message, say):
 
     # Route links before engage/mention/stop early returns. app_mention and
     # message events can overlap; message-link and alert claims are idempotent.
-    route_link_message_event(
-        message,
-        normalize_url,
-        lambda links: check_and_store_links(
+    if not _archive_optout_enabled(message_user):
+        route_link_message_event(
             message,
-            {"permalink": ""},
-            say,
-            links=links,
-        ),
-    )
+            normalize_url,
+            lambda links: check_and_store_links(
+                message,
+                {"permalink": ""},
+                say,
+                links=links,
+            ),
+        )
 
     # Controlla se il bot è menzionato nel messaggio
     bot_user_id = app._bot_user_id
@@ -1253,32 +1274,39 @@ def handle_message(message, say):
             logger.warning(f"Could not get permalink while archiving message: {e}")
             permalink = {'permalink': ''}
 
-        # Save original message data before opt-out check
-        original_text = message.get("text", "")
-        original_user = message.get("user", "")
+        # Keep the live Slack event intact. Archive opt-out controls persistence,
+        # while the separate AI opt-out controls whether the live event may be
+        # used as an AI trigger.
+        original_message = message.copy()
+        original_text = original_message.get("text", "")
+        original_user = original_message.get("user", "")
         
         # Check if user opted out
         cursor.execute("SELECT user, timestamp FROM optout WHERE user = ?", (message["user"],))
         row = cursor.fetchone()
 
-        clown_user = message["user"]
+        clown_user = original_user
+
+        archive_text = original_text
+        archive_user = original_user
+        archive_permalink = permalink.get("permalink", "")
 
         if row is not None:
-            message["text"] = "User opted out of archiving. This message has been deleted"
-            message["user"] = "USLACKBOT"
-            message["permalink"] = ""
+            archive_text = "User opted out of archiving. This message has been deleted"
+            archive_user = "USLACKBOT"
+            archive_permalink = ""
 
         logger.debug(permalink["permalink"])
         cursor.execute(
             "INSERT INTO messages VALUES(?, ?, ?, ?, ?, ?, ?)",
             (
-                message["text"],
-                message["user"],
+                archive_text,
+                archive_user,
                 message["channel"],
                 message["ts"],
-                permalink["permalink"],
+                archive_permalink,
                 message["thread_ts"] if "thread_ts" in message else message["ts"],
-                create_embeddings(message["text"])
+                create_embeddings(archive_text)
             ),
         )
         conn.commit()
@@ -1286,19 +1314,15 @@ def handle_message(message, say):
 
         # Engage is a core reply path: run it immediately after persistence so
         # unrelated link/reaction/user enrichment failures cannot silence it.
-        maybe_reply_to_engaged_thread(message, say)
+        maybe_reply_to_engaged_thread(original_message, say)
 
         # Keep original message data for link-adjacent behaviors.
-        original_message = message.copy()
-        original_message["text"] = original_text
-        original_message["user"] = original_user
-        
         # Post xcancel.com alternatives for any x.com links
         post_xcancel_alternatives(original_message, say)
 
         # Ensure that the user exists in the DB
         conn, cursor = db_connect(database_path)
-        cursor.execute("SELECT * FROM users WHERE id = ?", (message["user"],))
+        cursor.execute("SELECT * FROM users WHERE id = ?", (original_user,))
         row = cursor.fetchone()
         if row is None:
             update_users(conn, cursor)
@@ -2270,35 +2294,32 @@ def _auto_reply_in_thread(
     openai_client,
     say,
     *,
+    trigger_message,
     response_suffix="",
 ):
     """Reply in an engaged thread through the same grounded archive agent."""
-    bot_user_id = app._bot_user_id
-    latest_user_message = next(
-        (
-            message
-            for message in reversed(thread_messages)
-            if message.get("user_id") and message.get("user_id") != bot_user_id
-        ),
-        None,
-    )
-    if latest_user_message is None:
-        return
+    trigger_user_id = trigger_message.get("user") or trigger_message.get("user_id")
+    trigger_text = (trigger_message.get("text") or "").strip()
+    trigger_ts = trigger_message.get("ts")
+    if not trigger_user_id or not trigger_text or not trigger_ts:
+        raise RuntimeError("messaggio trigger engage incompleto")
 
-    formatted_messages = format_messages_for_prompt(thread_messages)
+    formatted_messages = format_messages_for_prompt(thread_messages) or (
+        "(Nessun altro messaggio del thread disponibile nel contesto AI.)"
+    )
     evidence = EvidenceRegistry()
     conn, _ = db_connect(database_path)
     try:
         search_engine = ArchiveSearchEngine(
             conn,
-            requester_user_id=latest_user_message.get("user_id", ""),
+            requester_user_id=trigger_user_id,
             current_channel_id=channel,
-            before_timestamp=latest_user_message.get("ts"),
+            before_timestamp=trigger_ts,
             evidence=evidence,
         )
         reply = run_archive_agent(
             openai_client,
-            question=latest_user_message.get("text", ""),
+            question=trigger_text,
             current_context=(
                 "Fonte contesto corrente: thread Slack ingaggiato\n\n"
                 + formatted_messages
@@ -2512,6 +2533,7 @@ def maybe_reply_to_engaged_thread(message, say):
     msg_user = message.get("user")
     previous_last_reply_ts = None
     claimed = False
+    ai_opted_out = False
 
     try:
         if msg_user == app._bot_user_id:
@@ -2520,9 +2542,57 @@ def maybe_reply_to_engaged_thread(message, say):
         if not thread_ts or thread_ts == ts or not channel or not ts:
             return
 
+        privacy_conn, privacy_cursor = db_connect(database_path)
+        try:
+            privacy_cursor.execute(
+                """
+                SELECT 1
+                FROM engaged_threads e
+                JOIN optout_ai o ON o.user = ?
+                WHERE e.thread_ts = ? AND e.channel = ?
+                  AND e.engaged = 1 AND e.stopped = 0
+                LIMIT 1
+                """,
+                (msg_user, thread_ts, channel),
+            )
+            ai_opted_out = privacy_cursor.fetchone() is not None
+        finally:
+            privacy_conn.close()
+        if ai_opted_out:
+            say(
+                "Non posso usare questo messaggio perché hai attivato l'opt-out AI. "
+                "Puoi modificare la preferenza dalla pagina dell'archivio.",
+                thread_ts=thread_ts,
+            )
+            return
+
         conn, cursor = db_connect(database_path)
         try:
+            cursor.execute(
+                "SELECT engaged, stopped, last_reply_ts FROM engaged_threads "
+                "WHERE thread_ts = ? AND channel = ?",
+                (thread_ts, channel),
+            )
+            row = cursor.fetchone()
+            if not row or not row[0] or row[1]:
+                return
+            previous_last_reply_ts = row[2]
+            if previous_last_reply_ts:
+                try:
+                    stale_or_duplicate = float(ts) <= float(previous_last_reply_ts)
+                except (TypeError, ValueError):
+                    stale_or_duplicate = ts == previous_last_reply_ts
+                if stale_or_duplicate:
+                    logger.info(
+                        "[ENGAGE] Stale or duplicate event %s ignored (last=%s)",
+                        ts,
+                        previous_last_reply_ts,
+                    )
+                    return
+
             cursor.execute("BEGIN IMMEDIATE")
+            # Re-read the state while holding the write reservation: another
+            # worker may have claimed or stopped the thread after the first read.
             cursor.execute(
                 "SELECT engaged, stopped, last_reply_ts FROM engaged_threads "
                 "WHERE thread_ts = ? AND channel = ?",
@@ -2579,9 +2649,6 @@ def maybe_reply_to_engaged_thread(message, say):
             fallback_to_archive=True,
             raise_errors=True,
         )
-        if not thread_messages:
-            raise RuntimeError("thread Slack e fallback archivio non disponibili")
-
         throttle_conn, throttle_cursor = db_connect(database_path)
         try:
             allowed, throttle_message, throttle_info = check_ai_throttle(
@@ -2603,6 +2670,7 @@ def maybe_reply_to_engaged_thread(message, say):
             thread_messages,
             client,
             say,
+            trigger_message=message,
             response_suffix=format_ai_rate_limit_footer(throttle_info),
         )
     except Exception as e:
@@ -2756,7 +2824,14 @@ def maybe_auto_engage_trash(message, say):
                     f"should_reply={should_reply}"
                 )
                 if should_reply:
-                    _auto_reply_in_thread(channel, thread_ts, thread_messages, client, say)
+                    _auto_reply_in_thread(
+                        channel,
+                        thread_ts,
+                        thread_messages,
+                        client,
+                        say,
+                        trigger_message=message,
+                    )
                 cursor.execute(
                     "UPDATE trash_engaged_threads SET last_reply_ts = ? "
                     "WHERE thread_ts = ? AND channel = ?",
