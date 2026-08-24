@@ -31,7 +31,7 @@ import ssl
 import dns.exception
 import dns.resolver
 
-from utils import db_connect, migrate_db
+from utils import db_connect
 
 
 logger = logging.getLogger(__name__)
@@ -906,11 +906,10 @@ class LinkEnrichmentWorker:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
-        conn, cursor = db_connect(self.database_path)
-        try:
-            migrate_db(conn, cursor)
-        finally:
-            conn.close()
+        # The application migrates the database once before Gunicorn forks.
+        # Repeating DDL here makes every post_fork hook contend for SQLite's
+        # writer lock and can prevent all web workers from booting. Runtime
+        # lock contention is handled by the retry loop in _run instead.
         self._thread = threading.Thread(
             target=self._run,
             name="link-enrichment-worker",
