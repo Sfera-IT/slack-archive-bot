@@ -107,6 +107,14 @@ def get_response(data):
     return response
 
 
+@flask_app.route('/healthz', methods=['GET'])
+def healthz():
+    """Liveness endpoint used by Docker and Traefik."""
+    response = get_response({'status': 'ok'})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 def log_and_return_error(e: Exception, status_code: int = 500):
     """Log exception with error ID and return generic error response."""
     error_id = uuid.uuid4().hex[:8]
