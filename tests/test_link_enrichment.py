@@ -499,9 +499,32 @@ def test_abandoned_claim_recovery_is_bounded():
     assert conn.execute("SELECT status FROM link_enrichment_jobs").fetchone()[0] == "failed"
 
 
+def test_worker_start_does_not_open_database_before_background_retry(monkeypatch):
+    worker = LinkEnrichmentWorker(
+        "locked.sqlite",
+        lambda text: np.array([1.0]),
+        poll_interval=0,
+        error_backoff=0,
+    )
+
+    def locked_database(_database_path):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(link_enrichment_module, "db_connect", locked_database)
+    monkeypatch.setattr(worker, "_run", worker._stop.set)
+
+    worker.start()
+    worker._thread.join(timeout=1.0)
+
+    assert not worker._thread.is_alive()
+
+
 def test_worker_starts_and_stops_without_blocking_shutdown():
     with tempfile.TemporaryDirectory() as directory:
         database_path = os.path.join(directory, "worker.sqlite")
+        conn = sqlite3.connect(database_path)
+        migrate_db(conn, conn.cursor())
+        conn.close()
         worker = LinkEnrichmentWorker(database_path, lambda text: np.array([1.0]), poll_interval=0.01)
         worker.start()
         assert worker._thread.daemon is True
