@@ -42,6 +42,7 @@ ADMIN_USERS = [
 ]
 
 DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-sol")
+MAX_CHAT_CONTEXT_REFS = 100
 
 def auth_required(f):
     @wraps(f)
@@ -354,6 +355,39 @@ def get_messages(channel_id):
     messages = [dict(msg) for msg in messages]
         
     return get_response([dict(ix) for ix in messages])
+
+
+def _fetch_thread_exact(conn, channel_id, thread_ts):
+    return conn.execute('''
+        SELECT
+        messages.message,
+        messages.user,
+        messages.channel,
+        messages.timestamp,
+        messages.permalink,
+        messages.thread_ts,
+        users.name as user_name
+        FROM messages
+        JOIN users ON messages.user = users.id
+        WHERE messages.channel = ?
+        AND (messages.timestamp = ? OR messages.thread_ts = ?)
+        AND messages.user NOT IN (SELECT user FROM optout)
+        ORDER BY CAST(messages.timestamp AS REAL) ASC
+        ''', (channel_id, thread_ts, thread_ts)).fetchall()
+
+
+@flask_app.route('/thread/<channel_id>/<thread_ts>', methods=['GET'])
+@auth_required
+@optin_required
+def get_thread_exact(channel_id, thread_ts):
+    """Channel-scoped thread route used by the currently published frontend."""
+    conn = get_db_connection()
+    try:
+        return get_response([
+            dict(row) for row in _fetch_thread_exact(conn, channel_id, thread_ts)
+        ])
+    finally:
+        conn.close()
 
 
 @flask_app.route('/thread/<message_id>', methods=['GET'])
@@ -896,6 +930,53 @@ def convert_markdown_to_slack(text):
     return text
 
 
+def _load_chat_context_from_refs(context_refs):
+    """Resolve the channel/timestamp references emitted by the live frontend."""
+    if not isinstance(context_refs, list) or len(context_refs) > MAX_CHAT_CONTEXT_REFS:
+        raise ValueError("Invalid chat context references")
+
+    normalized_refs = []
+    seen = set()
+    for item in context_refs:
+        if not isinstance(item, dict):
+            raise ValueError("Invalid chat context reference")
+        channel = item.get('channel')
+        timestamp = item.get('timestamp')
+        if (
+            not isinstance(channel, str)
+            or not channel
+            or len(channel) > 64
+            or not isinstance(timestamp, str)
+            or not timestamp
+            or len(timestamp) > 32
+        ):
+            raise ValueError("Invalid chat context reference")
+        key = (channel, timestamp)
+        if key not in seen:
+            seen.add(key)
+            normalized_refs.append(key)
+
+    conn = get_db_connection()
+    try:
+        context = []
+        for channel, timestamp in normalized_refs:
+            row = conn.execute('''
+                SELECT users.name AS user_name, messages.message
+                FROM messages
+                JOIN users ON users.id = messages.user
+                WHERE messages.channel = ?
+                  AND messages.timestamp = ?
+                  AND messages.user NOT IN (SELECT user FROM optout)
+                  AND messages.user NOT IN (SELECT user FROM optout_ai)
+                LIMIT 1
+                ''', (channel, timestamp)).fetchone()
+            if row:
+                context.append(dict(row))
+        return context
+    finally:
+        conn.close()
+
+
 @flask_app.route('/chat', methods=['POST'])
 @auth_required
 @optin_required
@@ -907,6 +988,12 @@ def chat():
     conversation = data.get('conversation', [])
     if not message:
         return jsonify({'error': 'No message provided'}), 400
+
+    if 'context_refs' in data:
+        try:
+            context = _load_chat_context_from_refs(data.get('context_refs'))
+        except ValueError:
+            return jsonify({'error': 'Invalid chat context'}), 400
 
     # Prepare context for OpenAI
     context_text = "\n".join([f"{msg['user_name']}: {msg['message']}" for msg in context])

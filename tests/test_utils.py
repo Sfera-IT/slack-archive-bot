@@ -149,6 +149,39 @@ def test_migrate_db_creates_hot_path_indexes():
         "idx_posted_links_normalized_posted_date",
     }.issubset(indexes)
 
+    member_index = cursor.execute(
+        "PRAGMA index_list('members')"
+    ).fetchall()
+    assert any(
+        row[1] == "idx_members_channel_user" and row[2] == 1
+        for row in member_index
+    )
+
+
+def test_migrate_db_deduplicates_members_before_enforcing_unique_index():
+    conn = sqlite3.connect(":memory:")
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE members(channel TEXT, user TEXT)")
+    cursor.execute(
+        "CREATE INDEX idx_members_channel_user ON members(channel, user)"
+    )
+    cursor.executemany(
+        "INSERT INTO members(channel, user) VALUES (?, ?)",
+        [("C1", "U1"), ("C1", "U1"), ("C1", "U2")],
+    )
+    conn.commit()
+
+    migrate_db(conn, cursor)
+
+    assert cursor.execute(
+        "SELECT channel, user FROM members ORDER BY channel, user"
+    ).fetchall() == [("C1", "U1"), ("C1", "U2")]
+    index_rows = cursor.execute("PRAGMA index_list('members')").fetchall()
+    assert any(
+        row[1] == "idx_members_channel_user" and row[2] == 1
+        for row in index_rows
+    )
+
 
 def test_migrate_db_creates_link_enrichment_tables_and_indexes():
     conn = sqlite3.connect(":memory:")
