@@ -153,6 +153,8 @@ The extractor uses anonymous public access only: it does not load cookies, log i
 or bypass private-account controls. Downloads use validated public IPs, revalidate
 redirects, and enforce per-file, aggregate, item-count, and time limits. Ambiguous
 Slack uploads are not retried automatically, avoiding duplicate files.
+The publication decision becomes irreversible when a job enters `uploading`; later
+message deletion or opt-out applies to future jobs and does not cancel an in-flight upload.
 
 Configuration:
 
@@ -162,6 +164,7 @@ Configuration:
 - `INSTAGRAM_MEDIA_MAX_FILE_BYTES` - per-file cap; default `52428800`.
 - `INSTAGRAM_MEDIA_MAX_TOTAL_BYTES` - aggregate post cap; default `104857600`.
 - `INSTAGRAM_MEDIA_TOTAL_TIMEOUT_SECONDS` - per-file DNS-through-body deadline; default `30`.
+- `INSTAGRAM_MEDIA_METADATA_TIMEOUT_SECONDS` - hard wall-clock deadline for metadata extraction; default `30`.
 - `INSTAGRAM_MEDIA_CONNECT_TIMEOUT_SECONDS` and `INSTAGRAM_MEDIA_READ_TIMEOUT_SECONDS` - operation ceilings; defaults `5` and `15`.
 - `INSTAGRAM_MEDIA_MAX_REDIRECTS` - redirect cap; default `5`.
 - `INSTAGRAM_MEDIA_POLL_SECONDS` and `INSTAGRAM_MEDIA_ERROR_BACKOFF_SECONDS` - worker delays; defaults `2` and `5`.

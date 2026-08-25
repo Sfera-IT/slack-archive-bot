@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 import logging
 import math
 import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -657,12 +660,12 @@ def download_remote_media(
     raise MediaDownloadError("Media redirect limit exceeded")
 
 
-def resolve_instagram_media(
+def _resolve_instagram_media_direct(
     shortcode: str,
     max_items: int,
     post_loader=None,
 ) -> list[RemoteMedia]:
-    """Resolve a public Instagram post to ordered image/video CDN URLs."""
+    """Resolve media in-process; callers must provide a hard outer deadline."""
     loader = None
     if post_loader is None:
         try:
@@ -735,6 +738,105 @@ def resolve_instagram_media(
     finally:
         if loader is not None:
             loader.close()
+
+
+def _metadata_wall_timeout(value: float | None = None) -> float:
+    if value is None:
+        try:
+            value = float(os.getenv("INSTAGRAM_MEDIA_METADATA_TIMEOUT_SECONDS", "30"))
+        except (TypeError, ValueError):
+            value = 30.0
+    if not math.isfinite(value) or value <= 0:
+        return 30.0
+    return value
+
+
+def resolve_instagram_media(
+    shortcode: str,
+    max_items: int,
+    post_loader=None,
+    *,
+    wall_timeout: float | None = None,
+) -> list[RemoteMedia]:
+    """Resolve public media with a killable wall-clock boundary by default."""
+    if post_loader is not None:
+        return _resolve_instagram_media_direct(shortcode, max_items, post_loader)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", shortcode):
+        raise MediaExtractionError("Invalid Instagram shortcode")
+
+    timeout = _metadata_wall_timeout(wall_timeout)
+    command = [
+        sys.executable,
+        "-m",
+        "instagram_media",
+        "--extract-json",
+        shortcode,
+        str(max_items),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MediaExtractionError(
+            f"Instagram metadata extraction exceeded {timeout:g}s wall-clock deadline"
+        ) from exc
+    except OSError as exc:
+        raise MediaExtractionError(
+            f"Could not start Instagram metadata extractor: {exc}"
+        ) from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or "extractor failed").strip()[:500]
+        raise MediaExtractionError(f"Could not resolve public Instagram post: {detail}")
+    try:
+        payload = json.loads(result.stdout)
+        media = [
+            RemoteMedia(
+                url=str(item["url"]),
+                index=int(item["index"]),
+                is_video=bool(item["is_video"]),
+            )
+            for item in payload
+        ]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise MediaExtractionError("Instagram extractor returned invalid JSON") from exc
+    if not media or len(media) > max_items or any(
+        not item.url or urlsplit(item.url).scheme.lower() != "https"
+        for item in media
+    ):
+        raise MediaExtractionError("Instagram extractor returned invalid media")
+    return media
+
+
+def _extract_json_cli(argv: list[str]) -> int:
+    if len(argv) != 3 or argv[0] != "--extract-json":
+        print("usage: python -m instagram_media --extract-json SHORTCODE MAX_ITEMS", file=sys.stderr)
+        return 2
+    shortcode = argv[1]
+    try:
+        max_items = int(argv[2])
+        if max_items <= 0 or not re.fullmatch(r"[A-Za-z0-9_-]+", shortcode):
+            raise ValueError
+        media = _resolve_instagram_media_direct(shortcode, max_items)
+    except (ValueError, MediaExtractionError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            [
+                {"url": item.url, "index": item.index, "is_video": item.is_video}
+                for item in media
+            ],
+            separators=(",", ":"),
+        )
+    )
+    return 0
 
 
 def _set_job_failure(
@@ -953,3 +1055,7 @@ class InstagramMediaWorker:
                 self._thread = None
                 return True
             return self._thread is None
+
+
+if __name__ == "__main__":
+    raise SystemExit(_extract_json_cli(sys.argv[1:]))

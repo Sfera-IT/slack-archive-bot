@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import subprocess
 import sys
 
 import httpx
@@ -754,6 +755,43 @@ def test_download_remote_media_rejects_unsupported_and_oversized_files(tmp_path)
             client=oversized_client,
             resolver=public_resolver,
         )
+
+
+def test_default_resolver_runs_extractor_with_hard_wall_clock(monkeypatch):
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": 0,
+                "stdout": '[{"url":"https://cdn.example/one.jpg","index":1,"is_video":false}]',
+                "stderr": "",
+            },
+        )()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    media = resolve_instagram_media("BOUND", 3, wall_timeout=4.5)
+
+    assert media == [RemoteMedia("https://cdn.example/one.jpg", 1, False)]
+    assert observed["timeout"] == 4.5
+    assert observed["shell"] is False
+    assert observed["command"][1:3] == ["-m", "instagram_media"]
+    assert observed["command"][-3:] == ["--extract-json", "BOUND", "3"]
+
+
+def test_default_resolver_maps_hard_timeout_to_extraction_error(monkeypatch):
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+
+    with pytest.raises(MediaExtractionError, match="wall-clock deadline"):
+        resolve_instagram_media("SLOW", 2, wall_timeout=0.01)
 
 
 def test_resolve_instagram_media_preserves_mixed_carousel_order():
