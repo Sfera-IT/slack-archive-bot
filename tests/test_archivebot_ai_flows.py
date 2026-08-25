@@ -69,6 +69,199 @@ def test_import_does_not_call_slack_api(archivebot_module):
     assert archivebot_module.app._bot_user_id
 
 
+def test_instagram_media_is_queued_before_mention_early_return(
+    archivebot_module, monkeypatch
+):
+    bot = archivebot_module
+    queued = []
+    mentioned = []
+    bot.app._bot_user_id = "UBOT"
+    monkeypatch.setattr(bot, "_initialize_bot_identity", lambda: "UBOT")
+    monkeypatch.setattr(bot, "_archive_optout_enabled", lambda _user: False)
+    monkeypatch.setattr(bot, "route_link_message_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        bot,
+        "queue_instagram_media_from_message",
+        lambda message: queued.append(message.copy()),
+        raising=False,
+    )
+    monkeypatch.setattr(bot, "_maybe_handle_engaged_stop", lambda *_args: False)
+    monkeypatch.setattr(
+        bot, "_maybe_handle_engage_command", lambda *_args: False
+    )
+    monkeypatch.setattr(
+        bot,
+        "handle_app_mention",
+        lambda message, say: mentioned.append(message.copy()),
+    )
+
+    message = {
+        "user": "U1",
+        "channel": "C1",
+        "channel_type": "channel",
+        "ts": "100.1",
+        "text": "<@UBOT> https://www.instagram.com/reel/ABC/",
+    }
+    bot.handle_message(message, lambda *_args, **_kwargs: None)
+
+    assert queued == [message]
+    assert mentioned == [message]
+
+
+def test_instagram_media_queue_is_opt_in_and_public_channels_only(
+    archivebot_module, monkeypatch
+):
+    bot = archivebot_module
+    message = {
+        "user": "U1",
+        "channel": "C1",
+        "channel_type": "channel",
+        "ts": "100.1",
+        "text": "https://www.instagram.com/p/PHOTO/",
+    }
+
+    monkeypatch.delenv("INSTAGRAM_MEDIA_ARCHIVE_ENABLED", raising=False)
+    assert bot.queue_instagram_media_from_message(message) == 0
+
+    monkeypatch.setenv("INSTAGRAM_MEDIA_ARCHIVE_ENABLED", "true")
+    private_message = {**message, "channel_type": "group", "ts": "100.2"}
+    assert bot.queue_instagram_media_from_message(private_message) == 0
+    assert bot.queue_instagram_media_from_message(message) == 1
+
+    conn = sqlite3.connect(bot.database_path)
+    assert conn.execute(
+        "SELECT channel, message_timestamp, shortcode FROM instagram_media_jobs"
+    ).fetchall() == [("C1", "100.1", "PHOTO")]
+    conn.close()
+
+
+def test_instagram_media_queue_caps_links_per_message(
+    archivebot_module, monkeypatch
+):
+    bot = archivebot_module
+    monkeypatch.setenv("INSTAGRAM_MEDIA_ARCHIVE_ENABLED", "true")
+    monkeypatch.setenv("INSTAGRAM_MEDIA_MAX_LINKS_PER_MESSAGE", "2")
+    message = {
+        "user": "U1",
+        "channel": "C1",
+        "channel_type": "channel",
+        "ts": "100.1",
+        "text": " ".join(
+            f"https://www.instagram.com/p/POST{index}/" for index in range(4)
+        ),
+    }
+
+    assert bot.queue_instagram_media_from_message(message) == 2
+    conn = sqlite3.connect(bot.database_path)
+    assert conn.execute(
+        "SELECT shortcode FROM instagram_media_jobs ORDER BY rowid"
+    ).fetchall() == [("POST0",), ("POST1",)]
+    conn.close()
+
+
+def test_message_changed_reconciles_instagram_media_jobs(
+    archivebot_module, monkeypatch
+):
+    bot = archivebot_module
+    monkeypatch.setenv("INSTAGRAM_MEDIA_ARCHIVE_ENABLED", "true")
+    original = {
+        "user": "U1",
+        "channel": "C1",
+        "channel_type": "channel",
+        "ts": "100.1",
+        "text": "https://www.instagram.com/p/OLD/",
+    }
+    assert bot.queue_instagram_media_from_message(original) == 1
+    monkeypatch.setattr(bot, "create_embeddings", lambda _text: b"")
+    monkeypatch.setattr(bot, "extract_external_links", lambda *_args: [])
+    monkeypatch.setattr(bot, "reconcile_edited_message_links", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(bot, "_cleanup_stored_duplicate_alerts", lambda *_args: None)
+    monkeypatch.setattr(bot, "check_and_store_links", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bot, "sync_xcancel_alternatives_for_message", lambda *_args: None)
+
+    bot.handle_message_changed(
+        {
+            "channel": "C1",
+            "channel_type": "channel",
+            "message": {
+                "user": "U1",
+                "ts": "100.1",
+                "text": "https://www.instagram.com/reel/NEW/",
+            },
+        },
+        lambda *_args, **_kwargs: None,
+    )
+
+    conn = sqlite3.connect(bot.database_path)
+    assert dict(
+        conn.execute("SELECT shortcode, status FROM instagram_media_jobs").fetchall()
+    ) == {"OLD": "cancelled", "NEW": "pending"}
+    conn.close()
+
+
+def test_message_deleted_cancels_instagram_media_jobs(
+    archivebot_module, monkeypatch
+):
+    bot = archivebot_module
+    monkeypatch.setenv("INSTAGRAM_MEDIA_ARCHIVE_ENABLED", "true")
+    message = {
+        "user": "U1",
+        "channel": "C1",
+        "channel_type": "channel",
+        "ts": "100.1",
+        "text": "https://www.instagram.com/p/DELETE/",
+    }
+    assert bot.queue_instagram_media_from_message(message) == 1
+    monkeypatch.setattr(bot, "collect_deleted_message_alerts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(bot, "_cleanup_stored_duplicate_alerts", lambda *_args: None)
+    monkeypatch.setattr(bot, "delete_xcancel_alert", lambda *_args: None)
+
+    bot.handle_message_deleted({"channel": "C1", "deleted_ts": "100.1"})
+
+    conn = sqlite3.connect(bot.database_path)
+    assert conn.execute(
+        "SELECT status FROM instagram_media_jobs"
+    ).fetchone()[0] == "cancelled"
+    conn.close()
+
+
+def test_instagram_worker_nonfinite_delays_use_defaults(archivebot_module, monkeypatch):
+    bot = archivebot_module
+    captured = {}
+
+    class CapturingWorker:
+        def __init__(self, _database_path, _client, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            return None
+
+    monkeypatch.setenv("INSTAGRAM_MEDIA_ARCHIVE_ENABLED", "true")
+    monkeypatch.setenv("INSTAGRAM_MEDIA_POLL_SECONDS", "inf")
+    monkeypatch.setenv("INSTAGRAM_MEDIA_ERROR_BACKOFF_SECONDS", "nan")
+    monkeypatch.setattr(bot, "InstagramMediaWorker", CapturingWorker)
+    bot._instagram_media_worker = None
+
+    bot.start_instagram_media_worker()
+
+    assert captured["poll_interval"] == 2.0
+    assert captured["error_backoff"] == 5.0
+
+
+def test_stop_instagram_worker_retains_live_worker_reference(archivebot_module):
+    bot = archivebot_module
+
+    class WorkerStillStopping:
+        def stop(self):
+            return False
+
+    worker = WorkerStillStopping()
+    bot._instagram_media_worker = worker
+
+    assert bot.stop_instagram_media_worker() is False
+    assert bot._instagram_media_worker is worker
+
+
 def test_healthz_is_public_and_does_not_require_runtime_dependencies(
     archivebot_module, monkeypatch
 ):

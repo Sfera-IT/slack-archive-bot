@@ -36,6 +36,7 @@ on the directory.  For example:
   - `groups:read` (if you want to archive/search private channels)
   - `im:history`
   - `users:read`
+  - `files:write` (required only when Instagram media archiving is enabled)
 
 5. Start slack-archive-bot with:
 
@@ -140,6 +141,33 @@ Configuration:
   `604800`.
 - `LINK_ENRICHMENT_POLL_SECONDS` and `LINK_ENRICHMENT_ERROR_BACKOFF_SECONDS` —
   idle polling and transient-error backoff; defaults `2` and `5`.
+
+## Instagram media archiving
+
+When explicitly enabled, public-channel Instagram post, reel, and TV links are
+resolved in a durable background queue. Images, videos, and mixed carousels are
+uploaded together into the source message thread. Reposts of the same Instagram
+post in one thread are deduplicated. The original link remains the fallback.
+
+The extractor uses anonymous public access only: it does not load cookies, log in,
+or bypass private-account controls. Downloads use validated public IPs, revalidate
+redirects, and enforce per-file, aggregate, item-count, and time limits. Ambiguous
+Slack uploads are not retried automatically, avoiding duplicate files.
+
+Configuration:
+
+- `INSTAGRAM_MEDIA_ARCHIVE_ENABLED` - opt in to the worker; default `false`.
+- `INSTAGRAM_MEDIA_MAX_LINKS_PER_MESSAGE` - queue admission cap; default `3`.
+- `INSTAGRAM_MEDIA_MAX_ITEMS` - carousel item cap; default `10`.
+- `INSTAGRAM_MEDIA_MAX_FILE_BYTES` - per-file cap; default `52428800`.
+- `INSTAGRAM_MEDIA_MAX_TOTAL_BYTES` - aggregate post cap; default `104857600`.
+- `INSTAGRAM_MEDIA_TOTAL_TIMEOUT_SECONDS` - per-file DNS-through-body deadline; default `30`.
+- `INSTAGRAM_MEDIA_CONNECT_TIMEOUT_SECONDS` and `INSTAGRAM_MEDIA_READ_TIMEOUT_SECONDS` - operation ceilings; defaults `5` and `15`.
+- `INSTAGRAM_MEDIA_MAX_REDIRECTS` - redirect cap; default `5`.
+- `INSTAGRAM_MEDIA_POLL_SECONDS` and `INSTAGRAM_MEDIA_ERROR_BACKOFF_SECONDS` - worker delays; defaults `2` and `5`.
+
+All numeric Instagram media limits and timeouts must be positive; invalid or non-positive values fall back to the defaults above.
+
 
 ## Searching
 
