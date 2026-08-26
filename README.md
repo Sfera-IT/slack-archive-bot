@@ -141,6 +141,14 @@ Configuration:
 - `LINK_ENRICHMENT_POLL_SECONDS` and `LINK_ENRICHMENT_ERROR_BACKOFF_SECONDS` —
   idle polling and transient-error backoff; defaults `2` and `5`.
 
+## XCancel alternatives
+
+Automatic XCancel alternatives for `x.com` links are disabled by default because
+the upstream XCancel service is currently unavailable. Set
+`XCANCEL_ALTERNATIVES_ENABLED=true` only after verifying that the service is back
+online. Alert tracking remains in place so previously published alternatives can
+still be cleaned up when their source message is edited or deleted.
+
 ## Searching
 
 To search the archive, direct message (DM) @ArchiveBot with the search query.
