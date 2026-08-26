@@ -199,6 +199,46 @@ def test_message_changed_reconciles_instagram_media_jobs(
     conn.close()
 
 
+def test_message_changed_removing_all_instagram_links_cancels_pending_job(
+    archivebot_module, monkeypatch
+):
+    bot = archivebot_module
+    monkeypatch.setenv("INSTAGRAM_MEDIA_ARCHIVE_ENABLED", "true")
+    original = {
+        "user": "U1",
+        "channel": "C1",
+        "channel_type": "channel",
+        "ts": "100.1",
+        "text": "https://www.instagram.com/p/REMOVE/",
+    }
+    assert bot.queue_instagram_media_from_message(original) == 1
+    monkeypatch.setattr(bot, "create_embeddings", lambda _text: b"")
+    monkeypatch.setattr(bot, "extract_external_links", lambda *_args: [])
+    monkeypatch.setattr(bot, "reconcile_edited_message_links", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(bot, "_cleanup_stored_duplicate_alerts", lambda *_args: None)
+    monkeypatch.setattr(bot, "check_and_store_links", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bot, "sync_xcancel_alternatives_for_message", lambda *_args: None)
+
+    bot.handle_message_changed(
+        {
+            "channel": "C1",
+            "channel_type": "channel",
+            "message": {
+                "user": "U1",
+                "ts": "100.1",
+                "text": "link removed",
+            },
+        },
+        lambda *_args, **_kwargs: None,
+    )
+
+    conn = sqlite3.connect(bot.database_path)
+    assert conn.execute(
+        "SELECT status FROM instagram_media_jobs WHERE shortcode = 'REMOVE'"
+    ).fetchone()[0] == "cancelled"
+    conn.close()
+
+
 def test_message_deleted_cancels_instagram_media_jobs(
     archivebot_module, monkeypatch
 ):

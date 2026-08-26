@@ -1218,7 +1218,7 @@ def _instagram_media_max_links_per_message():
         return 3
 
 
-def queue_instagram_media_from_message(message):
+def queue_instagram_media_from_message(message, *, reconcile_empty=False):
     """Persist supported Instagram links for asynchronous thread uploads."""
     if not _instagram_media_enabled() or message.get("channel_type") != "channel":
         return 0
@@ -1227,7 +1227,7 @@ def queue_instagram_media_from_message(message):
     urls = extract_instagram_post_urls(message.get("text", ""))[
         :_instagram_media_max_links_per_message()
     ]
-    if not channel or not message_timestamp or not urls:
+    if not channel or not message_timestamp or (not urls and not reconcile_empty):
         return 0
 
     conn, _cursor = db_connect(database_path)
@@ -2998,7 +2998,7 @@ def handle_message_changed(event, say):
 
     if not _archive_optout_enabled(message.get("user")):
         try:
-            queue_instagram_media_from_message(message)
+            queue_instagram_media_from_message(message, reconcile_empty=True)
         except Exception:
             logger.exception("Could not reconcile edited Instagram media jobs")
 
