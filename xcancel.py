@@ -1,7 +1,16 @@
+import os
 import re
 
 
 _X_COM_PATTERN = re.compile(r"^https?://(?:www\.)?x\.com/(.+)$", re.IGNORECASE)
+_ENABLED_VALUES = {"1", "true", "yes", "on"}
+
+
+def xcancel_alternatives_enabled():
+    """Return whether XCancel link suggestions are explicitly enabled."""
+    return os.getenv("XCANCEL_ALTERNATIVES_ENABLED", "false").strip().lower() in (
+        _ENABLED_VALUES
+    )
 
 
 def extract_urls(text):
@@ -11,8 +20,13 @@ def extract_urls(text):
     return [url.rstrip(".,;:!?") for url in urls]
 
 
-def build_xcancel_response_text(text):
+def build_xcancel_response_text(text, *, enabled=None):
     """Costruisce la risposta xcancel attesa per un testo Slack."""
+    if enabled is None:
+        enabled = xcancel_alternatives_enabled()
+    if not enabled:
+        return None
+
     if not text:
         return None
 
