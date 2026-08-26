@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# Trafilatura can otherwise promote a long consent banner to article text.
+COOKIE_CONSENT_PRUNE_XPATH = (
+    "//*[translate(@type, 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') = "
+    "'COOKIE_CONSENT']",
+    "//*[contains(translate(@class, 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), "
+    "'COOKIE_CONSENT')]",
+)
 
 
 class EnrichmentError(Exception):
@@ -568,6 +575,7 @@ def extract_document(result: FetchResult, *, max_content_chars: int = 20_000) ->
             favor_precision=True,
             output_format="json",
             with_metadata=True,
+            prune_xpath=list(COOKIE_CONSENT_PRUNE_XPATH),
         )
         if extracted:
             payload = json.loads(extracted)
@@ -584,7 +592,13 @@ def extract_document(result: FetchResult, *, max_content_chars: int = 20_000) ->
     else:
         quality = "url_only"
 
-    hash_input = content or "\n".join(part for part in (title, description) if part)
+    if quality == "full_text":
+        hash_input = content
+    elif quality == "metadata_only":
+        # Short extracted text is often shared navigation/interstitial boilerplate.
+        hash_input = "\n".join(part for part in (title, description) if part)
+    else:
+        hash_input = content
     content_hash = hashlib.sha256(hash_input.casefold().encode("utf-8")).hexdigest() if hash_input else None
     embedding_text = "\n".join(part for part in (title, description, content) if part)
 
