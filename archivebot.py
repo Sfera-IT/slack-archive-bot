@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 import traceback
 from sentence_transformers import SentenceTransformer
@@ -25,6 +26,12 @@ from utils import claim_xcancel_alert, db_connect, finalize_xcancel_alert, migra
 from url_cleaner import UrlCleaner
 from xcancel import build_xcancel_response_text
 from link_enrichment import LinkEnrichmentWorker
+from instagram_media import (
+    InstagramMediaWorker,
+    cancel_instagram_media_jobs_for_message,
+    extract_instagram_post_urls,
+    reconcile_instagram_media_jobs,
+)
 from link_duplicates import (
     collect_deleted_message_alerts,
     deliver_duplicate_alert,
@@ -53,6 +60,7 @@ ADMIN_USERS = [
 _sentence_transformer_model = None
 _sentence_transformer_lock = threading.Lock()
 _link_enrichment_worker = None
+_instagram_media_worker = None
 
 
 def _get_sentence_transformer():
@@ -1190,6 +1198,53 @@ def _archive_optout_enabled(user_id):
         conn.close()
 
 
+def _instagram_media_enabled():
+    return os.getenv("INSTAGRAM_MEDIA_ARCHIVE_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _instagram_media_max_links_per_message():
+    try:
+        value = int(os.getenv("INSTAGRAM_MEDIA_MAX_LINKS_PER_MESSAGE", "3"))
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        logger.warning("Invalid INSTAGRAM_MEDIA_MAX_LINKS_PER_MESSAGE; using 3")
+        return 3
+
+
+def queue_instagram_media_from_message(message, *, reconcile_empty=False):
+    """Persist supported Instagram links for asynchronous thread uploads."""
+    if not _instagram_media_enabled() or message.get("channel_type") != "channel":
+        return 0
+    channel = message.get("channel")
+    message_timestamp = message.get("ts")
+    urls = extract_instagram_post_urls(message.get("text", ""))[
+        :_instagram_media_max_links_per_message()
+    ]
+    if not channel or not message_timestamp or (not urls and not reconcile_empty):
+        return 0
+
+    conn, _cursor = db_connect(database_path)
+    try:
+        queued, _cancelled = reconcile_instagram_media_jobs(
+            conn,
+            channel=channel,
+            message_timestamp=message_timestamp,
+            thread_ts=message.get("thread_ts") or message_timestamp,
+            author=message.get("user", ""),
+            instagram_urls=urls,
+        )
+    finally:
+        conn.close()
+    return queued
+
+
 def handle_message(message, say):
     _initialize_bot_identity()
     logger.debug(message)
@@ -1212,6 +1267,10 @@ def handle_message(message, say):
     # Route links before engage/mention/stop early returns. app_mention and
     # message events can overlap; message-link and alert claims are idempotent.
     if not _archive_optout_enabled(message_user):
+        try:
+            queue_instagram_media_from_message(message)
+        except Exception:
+            logger.exception("Could not queue Instagram media archive job")
         route_link_message_event(
             message,
             normalize_url,
@@ -2924,6 +2983,8 @@ def handle_message_changed(event, say):
     message = event.get("message", {})
     if "channel" not in message and event.get("channel"):
         message["channel"] = event["channel"]
+    if "channel_type" not in message and event.get("channel_type"):
+        message["channel_type"] = event["channel_type"]
 
     # Slack a volte invia message_changed quando un messaggio viene cancellato
     # In questo caso, il messaggio ha subtype "tombstone" o non ha "text"
@@ -2934,6 +2995,12 @@ def handle_message_changed(event, say):
             logger.info(f"MESSAGE_CHANGED_AS_DELETED: Detected deletion via message_changed, ts={deleted_ts}")
             handle_message_deleted_logic(deleted_ts, event.get("channel"))
         return
+
+    if not _archive_optout_enabled(message.get("user")):
+        try:
+            queue_instagram_media_from_message(message, reconcile_empty=True)
+        except Exception:
+            logger.exception("Could not reconcile edited Instagram media jobs")
 
     links = extract_external_links(message.get("text", ""), normalize_url)
     conn, cursor = db_connect(database_path)
@@ -2979,6 +3046,16 @@ def handle_message_deleted_logic(deleted_ts, channel):
     if not deleted_ts:
         logger.warning("MESSAGE_DELETED: No deleted_ts provided, skipping cleanup")
         return
+
+    instagram_conn, _ = db_connect(database_path)
+    try:
+        cancel_instagram_media_jobs_for_message(
+            instagram_conn,
+            channel=channel,
+            message_timestamp=deleted_ts,
+        )
+    finally:
+        instagram_conn.close()
 
     link_conn, _ = db_connect(database_path)
     try:
@@ -3122,7 +3199,7 @@ def start_link_enrichment_worker():
     def positive_env_float(name, default):
         try:
             value = float(os.getenv(name, str(default)))
-            if value <= 0:
+            if not math.isfinite(value) or value <= 0:
                 raise ValueError
             return value
         except ValueError:
@@ -3148,11 +3225,55 @@ def stop_link_enrichment_worker():
     if _link_enrichment_worker is not None:
         _link_enrichment_worker.stop()
         _link_enrichment_worker = None
-        
-        
+
+
+def start_instagram_media_worker():
+    """Start one durable Instagram-media worker in this process."""
+    global _instagram_media_worker
+    if not _instagram_media_enabled():
+        logger.info("Instagram media archive worker disabled")
+        return None
+
+    def positive_env_float(name, default):
+        try:
+            value = float(os.getenv(name, str(default)))
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError
+            return value
+        except ValueError:
+            logger.warning("Invalid %s; using %s", name, default)
+            return default
+
+    if _instagram_media_worker is None:
+        _instagram_media_worker = InstagramMediaWorker(
+            str(database_path),
+            app.client,
+            poll_interval=positive_env_float(
+                "INSTAGRAM_MEDIA_POLL_SECONDS", 2.0
+            ),
+            error_backoff=positive_env_float(
+                "INSTAGRAM_MEDIA_ERROR_BACKOFF_SECONDS", 5.0
+            ),
+            logger=logger,
+        )
+    _instagram_media_worker.start()
+    return _instagram_media_worker
+
+
+def stop_instagram_media_worker():
+    global _instagram_media_worker
+    if _instagram_media_worker is None:
+        return True
+    stopped = _instagram_media_worker.stop()
+    if stopped:
+        _instagram_media_worker = None
+    return stopped
+
+
 def main():
     init()
     start_link_enrichment_worker()
+    start_instagram_media_worker()
 
     # Start the development server
     app.start(port=port)
@@ -3167,4 +3288,6 @@ __all__ = [
     'app',
     'start_link_enrichment_worker',
     'stop_link_enrichment_worker',
+    'start_instagram_media_worker',
+    'stop_instagram_media_worker',
 ]

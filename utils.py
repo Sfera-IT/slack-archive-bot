@@ -401,6 +401,145 @@ def migrate_db(conn, cursor):
     except:
         pass
 
+    # Durable Instagram-media queue. Rows transition to ``uploading`` before
+    # Slack publication; that state is intentionally never auto-reclaimed,
+    # because retrying an interrupted upload could publish duplicate files.
+    jobs_exists = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'instagram_media_jobs'"
+    ).fetchone() is not None
+    legacy_jobs_table = None
+    if jobs_exists:
+        pk_columns = [
+            row[1]
+            for row in sorted(
+                (row for row in cursor.execute("PRAGMA table_info(instagram_media_jobs)") if row[5]),
+                key=lambda row: row[5],
+            )
+        ]
+        if pk_columns != ["channel", "thread_ts", "shortcode"]:
+            legacy_jobs_table = "instagram_media_jobs_legacy"
+            cursor.execute("DROP INDEX IF EXISTS idx_instagram_media_jobs_ready")
+            cursor.execute(f"DROP TABLE IF EXISTS {legacy_jobs_table}")
+            cursor.execute(
+                f"ALTER TABLE instagram_media_jobs RENAME TO {legacy_jobs_table}"
+            )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS instagram_media_jobs (
+            channel TEXT NOT NULL,
+            message_timestamp TEXT NOT NULL,
+            thread_ts TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT '',
+            instagram_url TEXT NOT NULL,
+            shortcode TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at REAL NOT NULL DEFAULT 0,
+            claimed_at REAL,
+            claim_token TEXT,
+            last_error TEXT,
+            completed_at REAL,
+            PRIMARY KEY (channel, thread_ts, shortcode)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_instagram_media_jobs_ready
+        ON instagram_media_jobs(status, next_attempt_at)
+        """
+    )
+    try:
+        cursor.execute(
+            """
+            ALTER TABLE instagram_media_jobs
+            ADD COLUMN author TEXT NOT NULL DEFAULT ''
+            """
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    if legacy_jobs_table is not None:
+        legacy_columns = {
+            row[1] for row in cursor.execute(f"PRAGMA table_info({legacy_jobs_table})")
+        }
+
+        def legacy_column(name, fallback):
+            return name if name in legacy_columns else fallback
+
+        author = legacy_column("author", "''")
+        attempts = legacy_column("attempts", "0")
+        next_attempt_at = legacy_column("next_attempt_at", "0")
+        last_error = legacy_column("last_error", "NULL")
+        completed_at = legacy_column("completed_at", "NULL")
+        cursor.execute(
+            f"""
+            INSERT OR IGNORE INTO instagram_media_jobs
+                (channel, message_timestamp, thread_ts, author, instagram_url,
+                 shortcode, status, attempts, next_attempt_at, last_error, completed_at)
+            SELECT channel, message_timestamp, thread_ts, {author}, instagram_url,
+                   shortcode,
+                   CASE
+                       WHEN status = 'complete' THEN 'complete'
+                       WHEN status IN ('uploading', 'publication_uncertain')
+                           THEN 'publication_uncertain'
+                       ELSE 'cancelled'
+                   END,
+                   {attempts}, {next_attempt_at},
+                   COALESCE({last_error}, 'Legacy queue row migrated fail-closed'),
+                   {completed_at}
+            FROM {legacy_jobs_table}
+            ORDER BY rowid
+            """
+        )
+        cursor.execute(f"DROP TABLE {legacy_jobs_table}")
+
+    sources_existed = cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'instagram_media_sources'"
+    ).fetchone() is not None
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS instagram_media_sources (
+            channel TEXT NOT NULL,
+            message_timestamp TEXT NOT NULL,
+            thread_ts TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT '',
+            instagram_url TEXT NOT NULL,
+            shortcode TEXT NOT NULL,
+            PRIMARY KEY (channel, message_timestamp, shortcode)
+        )
+        """
+    )
+    # Backfill once when introducing source tracking. Re-running migrations must
+    # never resurrect a source removed by an edit or deletion. Unknown legacy
+    # authors stay fail-closed and are not eligible for publication.
+    if not sources_existed and legacy_jobs_table is None:
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO instagram_media_sources
+                (channel, message_timestamp, thread_ts, author, instagram_url, shortcode)
+            SELECT channel, message_timestamp, thread_ts, author, instagram_url, shortcode
+            FROM instagram_media_jobs
+            WHERE status != 'cancelled' AND author != ''
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE instagram_media_jobs
+            SET status = 'cancelled', claimed_at = NULL, claim_token = NULL,
+                last_error = 'Unknown legacy author migrated fail-closed'
+            WHERE author = '' AND status IN ('pending', 'processing')
+            """
+        )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_instagram_media_sources_job
+        ON instagram_media_sources(channel, thread_ts, shortcode)
+        """
+    )
+    conn.commit()
+
     # Tabella per tracciare i thread su #trash in cui il bot si è auto-ingaggiato
     try:
         cursor.execute(

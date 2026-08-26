@@ -1,6 +1,12 @@
 import os
 
-from archivebot import init, start_link_enrichment_worker, stop_link_enrichment_worker
+from archivebot import (
+    init,
+    start_instagram_media_worker,
+    start_link_enrichment_worker,
+    stop_instagram_media_worker,
+    stop_link_enrichment_worker,
+)
 
 bind = f"0.0.0.0:{os.getenv('ARCHIVE_BOT_PORT', 3333)}"
 workers = os.getenv("WORKERS", 4)
@@ -13,7 +19,9 @@ def on_starting(server):
 
 def post_fork(server, worker):
     start_link_enrichment_worker()
+    start_instagram_media_worker()
 
 
 def worker_exit(server, worker):
+    stop_instagram_media_worker()
     stop_link_enrichment_worker()

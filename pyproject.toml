@@ -34,6 +34,7 @@ dependencies = [
     "urllib3==2.7.0",
     "watchdog==4.0.1",
     "werkzeug==3.1.6",
+    "instaloader==4.15.3",
 ]
 
 [dependency-groups]
