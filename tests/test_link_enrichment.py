@@ -310,6 +310,85 @@ def test_extract_document_degrades_to_metadata_only():
     assert document.content_hash
 
 
+def test_metadata_only_hash_uses_page_metadata_not_short_extracted_boilerplate(monkeypatch):
+    monkeypatch.setattr(
+        link_enrichment_module.trafilatura,
+        "extract",
+        lambda *args, **kwargs: '{"text":"Generic navigation shared by every page"}',
+    )
+
+    def metadata_page(title, description, url):
+        return extract_document(
+            FetchResult(
+                requested_url=url,
+                final_url=url,
+                status_code=200,
+                content_type="text/html",
+                body=(
+                    f'<meta property="og:title" content="{title}">'
+                    f'<meta property="og:description" content="{description}">'
+                ).encode(),
+            )
+        )
+
+    first = metadata_page("First story", "First description", "https://example.com/first")
+    second = metadata_page("Second story", "Second description", "https://example.com/second")
+
+    assert first.extraction_quality == "metadata_only"
+    assert second.extraction_quality == "metadata_only"
+    assert first.content == second.content
+    assert first.content_hash != second.content_hash
+
+
+def test_extract_document_prunes_linkedin_cookie_consent_before_hashing():
+    def linkedin_page(title, description, url):
+        return extract_document(
+            FetchResult(
+                requested_url=url,
+                final_url=url,
+                status_code=200,
+                content_type="text/html",
+                body=f"""
+                    <html><head>
+                      <meta property="og:title" content="{title}">
+                      <meta property="og:description" content="{description}">
+                    </head><body>
+                      <div class="artdeco-global-alert artdeco-global-alert--COOKIE_CONSENT"
+                           type="COOKIE_CONSENT">
+                        <section><div><p>
+                          LinkedIn e terze parti utilizzano cookie essenziali e non essenziali
+                          per fornire, rendere sicuri, analizzare e migliorare i nostri servizi
+                          e per mostrarti annunci pertinenti su LinkedIn e altrove. Per saperne
+                          di più, consulta la nostra Informativa sui cookie.
+                        </p><p>
+                          Seleziona Accetta per accettare o Rifiuta per rifiutare i cookie non
+                          essenziali. Puoi aggiornare le tue scelte nelle impostazioni.
+                        </p></div></section>
+                      </div>
+                      <aside><p>A generic recommended story shown on every public post.</p></aside>
+                    </body></html>
+                """.encode(),
+            )
+        )
+
+    first = linkedin_page(
+        "First LinkedIn post",
+        "First post description",
+        "https://www.linkedin.com/posts/example-first",
+    )
+    second = linkedin_page(
+        "Second LinkedIn post",
+        "Second post description",
+        "https://www.linkedin.com/posts/example-second",
+    )
+
+    assert first.extraction_quality == "metadata_only"
+    assert second.extraction_quality == "metadata_only"
+    assert "cookie" not in first.content.casefold()
+    assert "cookie" not in second.content.casefold()
+    assert first.content_hash != second.content_hash
+
+
 def test_enqueue_and_claim_are_idempotent_and_claim_once():
     conn = migrated_connection()
 
