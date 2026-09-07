@@ -173,11 +173,15 @@ All numeric Instagram media limits and timeouts must be positive; invalid or non
 
 ## XCancel alternatives
 
-Automatic XCancel alternatives for `x.com` links are disabled by default because
-the upstream XCancel service is currently unavailable. Set
-`XCANCEL_ALTERNATIVES_ENABLED=true` only after verifying that the service is back
-online. Alert tracking remains in place so previously published alternatives can
-still be cleaned up when their source message is edited or deleted.
+Automatic XCancel alternatives for `x.com` links are enabled by default again
+following the upstream service's return in September 2026. Set
+`XCANCEL_ALTERNATIVES_ENABLED=false` to disable suggestions during an outage.
+Deployments that explicitly set this variable to `false` must remove the override
+or set it to `true` to re-enable suggestions, then restart the bot.
+The bot generates alternative links; it does not fetch tweet content or bypass
+XCancel's browser verification. Alert tracking remains in place so previously
+published alternatives can still be cleaned up when their source message is
+edited or deleted, including when suggestions are disabled.
 
 ## Searching
 
