@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 if ROOT_DIR not in sys.path:
@@ -9,22 +11,31 @@ if ROOT_DIR not in sys.path:
 from xcancel import build_xcancel_response_text, xcancel_alternatives_enabled
 
 
-def test_xcancel_alternatives_are_disabled_by_default(monkeypatch):
+def test_xcancel_alternatives_are_enabled_by_default(monkeypatch):
     monkeypatch.delenv("XCANCEL_ALTERNATIVES_ENABLED", raising=False)
-
-    assert xcancel_alternatives_enabled() is False
-    assert (
-        build_xcancel_response_text("https://x.com/someone/status/123") is None
-    )
-
-
-def test_xcancel_alternatives_can_be_explicitly_reenabled(monkeypatch):
-    monkeypatch.setenv("XCANCEL_ALTERNATIVES_ENABLED", "true")
 
     assert xcancel_alternatives_enabled() is True
     assert build_xcancel_response_text("https://x.com/someone/status/123") == (
         "🔗 Link senza Shitler: https://xcancel.com/someone/status/123"
     )
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "on", " TRUE "])
+def test_xcancel_alternatives_can_be_explicitly_enabled(monkeypatch, value):
+    monkeypatch.setenv("XCANCEL_ALTERNATIVES_ENABLED", value)
+
+    assert xcancel_alternatives_enabled() is True
+    assert build_xcancel_response_text("https://x.com/someone/status/123") == (
+        "🔗 Link senza Shitler: https://xcancel.com/someone/status/123"
+    )
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off", " FALSE ", "", "invalid"])
+def test_xcancel_alternatives_can_be_explicitly_disabled(monkeypatch, value):
+    monkeypatch.setenv("XCANCEL_ALTERNATIVES_ENABLED", value)
+
+    assert xcancel_alternatives_enabled() is False
+    assert build_xcancel_response_text("https://x.com/someone/status/123") is None
 
 
 def test_build_xcancel_response_for_single_x_link():

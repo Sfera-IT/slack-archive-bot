@@ -7,8 +7,8 @@ _ENABLED_VALUES = {"1", "true", "yes", "on"}
 
 
 def xcancel_alternatives_enabled():
-    """Return whether XCancel link suggestions are explicitly enabled."""
-    return os.getenv("XCANCEL_ALTERNATIVES_ENABLED", "false").strip().lower() in (
+    """Enable XCancel suggestions by default, with an explicit opt-out."""
+    return os.getenv("XCANCEL_ALTERNATIVES_ENABLED", "true").strip().lower() in (
         _ENABLED_VALUES
     )
 
