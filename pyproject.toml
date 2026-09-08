@@ -27,7 +27,7 @@ dependencies = [
     "pyjwt==2.13.0",
     "python-dotenv==1.2.2",
     "requests==2.33.0",
-    "sentence-transformers==2.2.2",
+    "sentence-transformers==3.4.1",
     "slack-bolt==1.18.0",
     "trafilatura==2.1.0",
     "torch==2.13.0",
