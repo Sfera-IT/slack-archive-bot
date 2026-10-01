@@ -38,6 +38,16 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# Retail pages share navigation, recommendations, consent and anti-bot text.
+# Those representations cannot reliably establish that two products are equal.
+AMAZON_DOMAINS = frozenset({
+    "amazon.com", "amazon.ca", "amazon.com.mx", "amazon.com.br",
+    "amazon.co.uk", "amazon.ie", "amazon.de", "amazon.fr", "amazon.it",
+    "amazon.es", "amazon.nl", "amazon.com.be", "amazon.pl", "amazon.se",
+    "amazon.com.tr", "amazon.ae", "amazon.sa", "amazon.eg", "amazon.co.za",
+    "amazon.in", "amazon.co.jp", "amazon.com.au", "amazon.sg",
+    "amazon.com.sg", "amazon.cn", "amzn.to", "amzn.eu", "amzn.com", "a.co",
+})
 # Trafilatura can otherwise promote a long consent banner to article text.
 COOKIE_CONSENT_PRUNE_XPATH = (
     "//*[translate(@type, 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') = "
@@ -45,6 +55,18 @@ COOKIE_CONSENT_PRUNE_XPATH = (
     "//*[contains(translate(@class, 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), "
     "'COOKIE_CONSENT')]",
 )
+
+
+def supports_enriched_matching(*urls: str | None) -> bool:
+    """Keep Amazon URLs and resolved destinations out of content comparisons."""
+    for url in urls:
+        try:
+            hostname = (urlsplit(url or "").hostname or "").lower().rstrip(".")
+        except ValueError:
+            return False
+        if any(hostname == domain or hostname.endswith("." + domain) for domain in AMAZON_DOMAINS):
+            return False
+    return True
 
 
 class EnrichmentError(Exception):
@@ -601,6 +623,10 @@ def extract_document(result: FetchResult, *, max_content_chars: int = 20_000) ->
         hash_input = content
     content_hash = hashlib.sha256(hash_input.casefold().encode("utf-8")).hexdigest() if hash_input else None
     embedding_text = "\n".join(part for part in (title, description, content) if part)
+    if not supports_enriched_matching(result.requested_url, result.final_url, canonical_url):
+        quality = "url_only"
+        content_hash = None
+        embedding_text = ""
 
     return EnrichedDocument(
         requested_url=result.requested_url,
