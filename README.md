@@ -124,6 +124,13 @@ sites, bypass paywalls, or extract PDFs/media. Metadata-only pages require a
 higher similarity score; failed or unsupported pages retain exact-link checking
 but cannot produce a semantic match.
 
+Amazon retail links (including regional domains and `amzn.to`, `amzn.eu`,
+`amzn.com`, and `a.co` short links) retain exact-URL checking only. Shared page
+templates and interstitials do not reliably identify a product, so these links
+cannot produce same-content or same-story alerts. The exclusion also applies
+to resolved/canonical Amazon destinations, existing cached documents, and
+partially completed scans; no cache reset is required.
+
 Configuration:
 
 - `LINK_ENRICHMENT_ENABLED` — enable the worker; default `true`.

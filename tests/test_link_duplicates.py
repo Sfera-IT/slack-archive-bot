@@ -27,7 +27,7 @@ from link_duplicates import (
     route_link_message_event,
 )
 import link_duplicates as link_duplicates_module
-from link_enrichment import enqueue_link
+from link_enrichment import AMAZON_DOMAINS, FetchResult, enqueue_link, process_next_job
 from utils import migrate_db
 
 
@@ -988,3 +988,155 @@ def test_cached_exact_url_wins_before_background_enriched_scan():
 
         assert claim is not None
         assert claim.match_type == "exact_url"
+
+
+@pytest.mark.parametrize("amazon_side", ["current", "source"])
+@pytest.mark.parametrize("url_field", ["normalized_url", "requested_url", "final_url", "canonical_url"])
+@pytest.mark.parametrize("evidence", ["identical_content", "similar_story", "metadata_only"])
+def test_cached_amazon_documents_never_produce_enriched_alerts(amazon_side, url_field, evidence):
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    amazon_url = "https://www.amazon.it/dp/B012345678"
+    source_url = "https://source.example/product"
+    current_url = "https://current.example/product"
+    if url_field == "normalized_url":
+        if amazon_side == "source":
+            source_url = amazon_url
+        else:
+            current_url = amazon_url
+    for channel, timestamp, url in [("C1", "900.1", source_url), ("C2", "1000.2", current_url)]:
+        add_link(conn, channel=channel, message_ts=timestamp, thread_ts=timestamp, normalized_url=url)
+        complete_document(
+            conn, url, content="Shared retail template",
+            content_hash=url if evidence == "similar_story" else "same-template",
+            embedding=[1, 0],
+            quality="metadata_only" if evidence == "metadata_only" else "full_text",
+        )
+    if url_field != "normalized_url":
+        # The column names come exclusively from the parametrized allowlist.
+        conn.execute(
+            f"UPDATE link_documents SET {url_field} = ? WHERE normalized_url = ?",
+            (amazon_url, source_url if amazon_side == "source" else current_url),
+        )
+    conn.commit()
+
+    # An older/in-flight scan must also be refused at the durable alert boundary.
+    stale_match = DuplicateMatch(current_url, source_url, "C1", "900.1", "900.1", "https://workspace.slack.com/source", 900.1)
+    assert claim_duplicate_alert(
+        conn, current_channel="C2", current_message_ts="1000.2", current_thread_ts="1000.2",
+        current_normalized_url=current_url, match=stale_match,
+        match_type="same_content" if evidence == "identical_content" else "same_story",
+        text="Stale Amazon match", score=1.0, now=1100.0,
+    ) is None
+    assert prepare_enriched_duplicate_alerts(conn, now=1100.0) == []
+    assert conn.execute("SELECT COUNT(*) FROM link_duplicate_alerts").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM link_match_scans").fetchone()[0] == 0
+    assert conn.execute("SELECT duplicate_checked_at FROM message_links WHERE channel = 'C2'").fetchone()[0] == 1100.0
+
+
+@pytest.mark.parametrize("domain", sorted(AMAZON_DOMAINS) + ["WWW.AMAZON.IT.", "smile.amazon.co.uk"])
+def test_amazon_domains_with_different_products_are_silent_but_exact_reposts_still_alert(domain):
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    first_url = f"https://{domain}/dp/B012345678"
+    other_url = f"https://{domain}/dp/B087654321"
+    add_link(conn, channel="C1", message_ts="900.1", thread_ts="900.1", normalized_url=first_url)
+    add_link(conn, channel="C2", message_ts="1000.2", thread_ts="1000.2", normalized_url=other_url)
+    for url in [first_url, other_url]:
+        complete_document(conn, url, content="Identical Amazon navigation", content_hash="template", embedding=[1, 0])
+
+    assert prepare_enriched_duplicate_alerts(conn, now=1100.0) == []
+    claim = prepare(conn, message_ts="1200.0", links=[ExternalLink(first_url, first_url)])
+    assert claim is not None
+    assert claim.match_type == "exact_url"
+    posted = []
+    assert deliver_duplicate_alert(
+        conn, claim, post=lambda text, thread: posted.append((text, thread)) or {"ts": "1200.9"},
+        delete=lambda *args: pytest.fail("Exact repost delivery should succeed"),
+    ) is True
+    assert len(posted) == 1
+    assert "*stesso link*" in posted[0][0]
+
+
+@pytest.mark.parametrize("url", [
+    "https://amazon.it.example.com/article",
+    "https://notamazon.it/article",
+    "https://example.com/amazon.it/article",
+    "https://example.com/article?ref=https://amazon.it/dp/B012345678",
+])
+def test_amazon_lookalike_or_mentioned_urls_retain_story_matching(url):
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    source_url = "https://news.example/article"
+    for channel, timestamp, link in [("C1", "900.1", source_url), ("C2", "1000.2", url)]:
+        add_link(conn, channel=channel, message_ts=timestamp, thread_ts=timestamp, normalized_url=link)
+        complete_document(conn, link, content="Report", content_hash=link, embedding=[1, 0])
+
+    claims = prepare_enriched_duplicate_alerts(conn, now=1100.0)
+    assert len(claims) == 1
+    assert claims[0].match_type == "same_story"
+
+
+@pytest.mark.parametrize("evidence", ["identical_content", "similar_story"])
+def test_scan_resumed_after_upgrade_drops_amazon_winner_and_finds_eligible_story(monkeypatch, evidence):
+    conn = migrated_connection()
+    add_channel(conn, "C1")
+    add_channel(conn, "C2")
+    amazon_url = "https://redirect.example/product"
+    news_url = "https://news.example/report"
+    current_url = "https://current.example/report"
+    for timestamp, url in [("900.1", amazon_url), ("950.1", news_url), ("1000.2", current_url)]:
+        channel = "C2" if url == current_url else "C1"
+        add_link(conn, channel=channel, message_ts=timestamp, thread_ts=timestamp, normalized_url=url)
+        complete_document(
+            conn, url, content="Report", content_hash="same" if evidence == "identical_content" else url,
+            embedding=[0.99, 0.01] if url == news_url else [1, 0],
+        )
+    conn.execute("UPDATE link_documents SET final_url = 'https://amazon.it/dp/B012345678' WHERE normalized_url = ?", (amazon_url,))
+    conn.execute("UPDATE message_links SET duplicate_checked_at = 1 WHERE channel = 'C1'")
+    conn.commit()
+    # Simulate the pre-upgrade worker checkpointing an Amazon winner mid-scan.
+    with monkeypatch.context() as old_worker:
+        old_worker.setattr(link_duplicates_module, "supports_enriched_matching", lambda *urls: True)
+        assert prepare_enriched_duplicate_alerts(conn, now=1100.0, max_candidate_comparisons=1) == []
+
+    claims = prepare_enriched_duplicate_alerts(conn, now=1101.0)
+    assert len(claims) == 1
+    assert claims[0].source_normalized_url == news_url
+    assert claims[0].match_type == ("same_content" if evidence == "identical_content" else "same_story")
+    assert conn.execute("SELECT COUNT(*) FROM link_match_scans").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("amazon_destination", ["requested", "final", "canonical"])
+def test_enrichment_worker_keeps_amazon_pages_out_of_embeddings_and_alerts(amazon_destination):
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, "amazon.sqlite")
+        conn = migrated_connection(path)
+        add_channel(conn, "C1")
+        add_channel(conn, "C2")
+        embeddings = []
+        for index, (channel, timestamp) in enumerate([("C1", "900.1"), ("C2", "1000.2")]):
+            product_url = f"https://www.amazon.it/dp/B01234567{index}"
+            requested_url = product_url if amazon_destination == "requested" else f"https://redirect.example/{index}"
+            final_url = product_url if amazon_destination == "final" else requested_url
+            canonical_url = product_url if amazon_destination == "canonical" else final_url
+            claim = prepare(conn, channel=channel, message_ts=timestamp, links=[ExternalLink(requested_url, requested_url)])
+            assert claim is None
+            html = (
+                f'<html><head><title>Amazon product {index}</title><link rel="canonical" href="{canonical_url}"></head>'
+                '<body><article><p>' + "Shared retail navigation, delivery and cookie information. " * 30 + '</p></article></body></html>'
+            ).encode()
+            result = FetchResult(requested_url, final_url, 200, "text/html", html)
+            assert process_next_job(
+                path, lambda text: embeddings.append(text) or [1, 0], fetcher=lambda url: result,
+            ) is True
+
+        assert embeddings == []
+        assert conn.execute("SELECT extraction_quality, content_hash, embedding FROM link_documents").fetchall() == [
+            ("url_only", None, None), ("url_only", None, None),
+        ]
+        assert prepare_enriched_duplicate_alerts(conn, now=1100.0) == []
+        assert conn.execute("SELECT COUNT(*) FROM message_links").fetchone()[0] == 2

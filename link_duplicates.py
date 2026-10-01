@@ -18,7 +18,7 @@ import uuid
 
 import numpy as np
 
-from link_enrichment import enqueue_link
+from link_enrichment import enqueue_link, supports_enriched_matching
 
 
 DUPLICATE_WINDOW_SECONDS = 45 * 24 * 60 * 60
@@ -164,6 +164,15 @@ def find_exact_duplicate(
     return DuplicateMatch(*row)
 
 
+def _document_supports_enriched_matching(conn: sqlite3.Connection, normalized_url: str) -> bool:
+    """Apply URL policy to cached documents as well as newly extracted pages."""
+    row = conn.execute(
+        "SELECT requested_url, final_url, canonical_url FROM link_documents WHERE normalized_url = ?",
+        (normalized_url,),
+    ).fetchone()
+    return supports_enriched_matching(normalized_url, *(row or ()))
+
+
 def claim_duplicate_alert(
     conn: sqlite3.Connection,
     *,
@@ -181,6 +190,12 @@ def claim_duplicate_alert(
     claim_token = uuid.uuid4().hex
     cursor = conn.cursor()
     cursor.execute("BEGIN IMMEDIATE")
+    if match_type != "exact_url" and not (
+        _document_supports_enriched_matching(conn, current_normalized_url)
+        and _document_supports_enriched_matching(conn, match.source_normalized_url)
+    ):
+        conn.commit()
+        return None
     current_exists = cursor.execute(
         """
         SELECT 1 FROM message_links
@@ -743,6 +758,18 @@ def prepare_enriched_duplicate_alerts(
         if current is None:
             _delete_match_scan(conn, scan)
             continue
+        if not _document_supports_enriched_matching(conn, normalized_url):
+            conn.execute(
+                """
+                UPDATE message_links SET duplicate_checked_at = ?
+                WHERE channel = ? AND message_timestamp = ? AND normalized_url = ?
+                  AND deterministic_checked_at IS NOT NULL AND duplicate_checked_at IS NULL
+                """,
+                (now, channel, message_ts, normalized_url),
+            )
+            conn.commit()
+            _delete_match_scan(conn, scan)
+            continue
 
         thread_ts, posted_at, current_content, current_hash, current_embedding, current_quality = current
         page_size = comparisons_left
@@ -752,7 +779,8 @@ def prepare_enriched_duplicate_alerts(
                    prior.message_timestamp, prior.thread_ts, prior.permalink,
                    prior.posted_at, document.content, document.content_hash,
                    document.embedding, document.extraction_quality,
-                   document.fetch_status, prior_channel.is_private
+                   document.fetch_status, prior_channel.is_private,
+                   document.requested_url, document.final_url, document.canonical_url
             FROM message_links prior
             LEFT JOIN channels prior_channel ON prior_channel.id = prior.channel
             LEFT JOIN link_documents document
@@ -777,6 +805,11 @@ def prepare_enriched_duplicate_alerts(
             if semantic_payload
             else None
         )
+        # Scans started by an older version may already contain an Amazon match.
+        if content_match and not _document_supports_enriched_matching(conn, content_match.source_normalized_url):
+            content_match = None
+        if semantic_match and not _document_supports_enriched_matching(conn, semantic_match[1].source_normalized_url):
+            semantic_match = None
 
         for (
             rowid,
@@ -792,6 +825,9 @@ def prepare_enriched_duplicate_alerts(
             source_quality,
             source_fetch_status,
             source_is_private,
+            source_requested_url,
+            source_final_url,
+            source_canonical_url,
         ) in page:
             if not (
                 posted_at - DUPLICATE_WINDOW_SECONDS <= source_posted_at < posted_at
@@ -801,6 +837,9 @@ def prepare_enriched_duplicate_alerts(
                 and source_is_private == 0
                 and source_fetch_status == "complete"
                 and source_quality in {"full_text", "metadata_only"}
+                and supports_enriched_matching(
+                    source_normalized_url, source_requested_url, source_final_url, source_canonical_url,
+                )
             ):
                 continue
             match = DuplicateMatch(
