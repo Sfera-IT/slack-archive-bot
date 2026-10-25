@@ -22,9 +22,8 @@ from ai_diagnostics import (
     set_ai_debug_enabled,
 )
 from archive_search import ArchiveSearchEngine, EvidenceRegistry
-from utils import claim_xcancel_alert, db_connect, finalize_xcancel_alert, migrate_db
+from utils import db_connect, migrate_db
 from url_cleaner import UrlCleaner
-from xcancel import build_xcancel_response_text
 from link_enrichment import LinkEnrichmentWorker
 from instagram_media import (
     InstagramMediaWorker,
@@ -704,256 +703,6 @@ def normalize_url(url):
         return url
 
 
-def save_xcancel_alert(parent_ts, alert_ts, channel, alert_text):
-    """Salva il riferimento all'alert xcancel per cancellarlo quando serve."""
-    if not parent_ts or not alert_ts or not channel:
-        return
-
-    conn, cursor = db_connect(database_path)
-    try:
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO xcancel_alerts
-            (parent_message_ts, alert_message_ts, channel, alert_text)
-            VALUES (?, ?, ?, ?)
-            """,
-            (parent_ts, alert_ts, channel, alert_text),
-        )
-        conn.commit()
-        logger.debug(f"Saved xcancel alert reference: parent_ts={parent_ts}, alert_ts={alert_ts}")
-    except Exception as e:
-        logger.error(f"Error saving xcancel alert reference: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
-
-
-def delete_xcancel_alert(parent_ts, channel=None):
-    """Cancella da Slack e dal DB l'alert xcancel associato a un messaggio."""
-    if not parent_ts:
-        return False
-
-    conn, cursor = db_connect(database_path)
-    deleted_any = False
-    try:
-        if channel:
-            cursor.execute(
-                """
-                SELECT alert_message_ts, channel
-                FROM xcancel_alerts
-                WHERE parent_message_ts = ? AND channel = ?
-                """,
-                (parent_ts, channel),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT alert_message_ts, channel
-                FROM xcancel_alerts
-                WHERE parent_message_ts = ?
-                """,
-                (parent_ts,),
-            )
-
-        alerts = cursor.fetchall()
-
-        for alert_ts, alert_channel in alerts:
-            if not alert_ts:
-                # Riserva senza messaggio ancora postato: nulla da cancellare su Slack.
-                continue
-            try:
-                app.client.chat_delete(channel=alert_channel, ts=alert_ts)
-                deleted_any = True
-                logger.info(
-                    f"XCANCEL_ALERT_DELETED: Deleted orphaned xcancel alert: "
-                    f"alert_ts='{alert_ts}' channel='{alert_channel}' parent_ts='{parent_ts}'"
-                )
-            except Exception as e:
-                logger.warning(f"Could not delete xcancel alert {alert_ts}: {e}")
-
-        if alerts:
-            if channel:
-                cursor.execute(
-                    "DELETE FROM xcancel_alerts WHERE parent_message_ts = ? AND channel = ?",
-                    (parent_ts, channel),
-                )
-            else:
-                cursor.execute("DELETE FROM xcancel_alerts WHERE parent_message_ts = ?", (parent_ts,))
-            conn.commit()
-
-    except Exception as e:
-        logger.error(f"Error deleting xcancel alert for parent_ts={parent_ts}: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
-
-    return deleted_any
-
-
-def get_xcancel_alert_text(parent_ts, channel):
-    """Restituisce il testo dell'alert xcancel tracciato, se presente."""
-    if not parent_ts or not channel:
-        return None
-
-    conn, cursor = db_connect(database_path)
-    try:
-        cursor.execute(
-            """
-            SELECT alert_text
-            FROM xcancel_alerts
-            WHERE parent_message_ts = ? AND channel = ?
-            """,
-            (parent_ts, channel),
-        )
-        row = cursor.fetchone()
-        return row[0] if row else None
-    finally:
-        conn.close()
-
-
-def claim_xcancel_alert_slot(parent_ts, channel, alert_text):
-    """Riserva lo slot dell'alert xcancel.
-
-    Returns:
-        True se la riserva è acquisita, False se un altro handler l'ha già
-        presa, None se la riserva è fallita per un errore DB.
-    """
-    if not parent_ts or not channel:
-        return False
-
-    conn, cursor = db_connect(database_path)
-    try:
-        claimed = claim_xcancel_alert(cursor, parent_ts, channel, alert_text)
-        conn.commit()
-        return claimed
-    except Exception as e:
-        logger.error(f"Error claiming xcancel alert slot: {e}")
-        conn.rollback()
-        return None
-    finally:
-        conn.close()
-
-
-def finalize_xcancel_alert_claim(parent_ts, alert_ts, channel, alert_text):
-    """Completa la riserva con il ts dell'alert postato.
-
-    Returns:
-        True se la riserva era ancora presente, False se è stata rimossa o
-        sostituita nel frattempo (parent cancellato o testo modificato).
-    """
-    conn, cursor = db_connect(database_path)
-    try:
-        finalized = finalize_xcancel_alert(cursor, parent_ts, alert_ts, channel, alert_text)
-        conn.commit()
-        return finalized
-    except Exception as e:
-        logger.error(f"Error finalizing xcancel alert claim: {e}")
-        conn.rollback()
-        # In dubbio meglio tenere l'alert postato che cancellarlo per un
-        # errore di bookkeeping.
-        return True
-    finally:
-        conn.close()
-
-
-def release_xcancel_alert_claim(parent_ts, channel, alert_text):
-    """Rilascia la riserva dell'alert xcancel se il post su Slack non è riuscito.
-
-    Rimuove solo la riserva con lo stesso testo, per non toccare una riserva
-    più recente acquisita nel frattempo da un altro handler.
-    """
-    conn, cursor = db_connect(database_path)
-    try:
-        cursor.execute(
-            """
-            DELETE FROM xcancel_alerts
-            WHERE parent_message_ts = ? AND channel = ?
-              AND alert_message_ts = '' AND alert_text = ?
-            """,
-            (parent_ts, channel, alert_text),
-        )
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Error releasing xcancel alert claim: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
-
-
-def post_xcancel_alternatives(message, say):
-    """Se il messaggio contiene link a x.com, posta le alternative xcancel.com nel thread."""
-    response_text = build_xcancel_response_text(message.get("text", ""))
-    if not response_text:
-        return
-
-    parent_ts = message.get("ts")
-    channel = message.get("channel")
-    thread_ts = message.get("thread_ts", parent_ts)
-
-    # L'evento message e il message_changed generato dall'unfurl del link (o un
-    # retry di Slack) possono processare lo stesso messaggio in parallelo: solo
-    # chi riserva lo slot posta l'alert, gli altri escono senza duplicare.
-    claimed = claim_xcancel_alert_slot(parent_ts, channel, response_text)
-    if claimed is False:
-        logger.debug(
-            f"XCANCEL_ALERT_ALREADY_CLAIMED: parent_ts={parent_ts} channel={channel}"
-        )
-        return
-    if claimed is None:
-        # Riserva fallita per errore DB: meglio rischiare un raro duplicato
-        # che sopprimere l'alert in silenzio.
-        logger.warning(
-            f"XCANCEL_CLAIM_FAILED: posting without claim, parent_ts={parent_ts} channel={channel}"
-        )
-
-    try:
-        result = say(text=response_text, thread_ts=thread_ts)
-        alert_ts = result.get("ts") if result else None
-        if not alert_ts:
-            if claimed:
-                release_xcancel_alert_claim(parent_ts, channel, response_text)
-            return
-
-        if claimed:
-            if not finalize_xcancel_alert_claim(parent_ts, alert_ts, channel, response_text):
-                # Il parent è stato cancellato (o il testo modificato) mentre
-                # postavamo: l'alert appena creato non serve più.
-                try:
-                    app.client.chat_delete(channel=channel, ts=alert_ts)
-                    logger.info(
-                        f"XCANCEL_ALERT_SUPERSEDED: removed stale alert {alert_ts} in {channel}"
-                    )
-                except Exception as e:
-                    logger.warning(f"Could not delete stale xcancel alert {alert_ts}: {e}")
-                return
-        else:
-            save_xcancel_alert(parent_ts, alert_ts, channel, response_text)
-        logger.info("Posted xcancel alternatives")
-    except Exception as e:
-        if claimed:
-            release_xcancel_alert_claim(parent_ts, channel, response_text)
-        logger.error(f"Error posting xcancel alternative: {e}")
-
-
-def sync_xcancel_alternatives_for_message(message, say):
-    """Allinea l'alert xcancel quando un messaggio viene modificato."""
-    parent_ts = message.get("ts")
-    channel = message.get("channel")
-    expected_text = build_xcancel_response_text(message.get("text", ""))
-    existing_text = get_xcancel_alert_text(parent_ts, channel)
-
-    if not expected_text:
-        delete_xcancel_alert(parent_ts, channel)
-        return
-
-    if existing_text == expected_text:
-        logger.debug(f"XCANCEL_ALERT_UNCHANGED: parent_ts={parent_ts} channel={channel}")
-        return
-
-    delete_xcancel_alert(parent_ts, channel)
-    post_xcancel_alternatives(message, say)
-
-
 def check_and_store_links(message, permalink_dict, say, *, links=None):
     """Record every external link and post at most one deterministic alert."""
     links = links or extract_external_links(message.get("text", ""), normalize_url)
@@ -1374,10 +1123,6 @@ def handle_message(message, say):
         # Engage is a core reply path: run it immediately after persistence so
         # unrelated link/reaction/user enrichment failures cannot silence it.
         maybe_reply_to_engaged_thread(original_message, say)
-
-        # Keep original message data for link-adjacent behaviors.
-        # Post xcancel.com alternatives for any x.com links
-        post_xcancel_alternatives(original_message, say)
 
         # Ensure that the user exists in the DB
         conn, cursor = db_connect(database_path)
@@ -3038,7 +2783,6 @@ def handle_message_changed(event, say):
     except Exception as e:
         logger.warning(f"Could not get permalink for edited message: {e}")
     check_and_store_links(message, permalink, say)
-    sync_xcancel_alternatives_for_message(message, say)
 
 
 def handle_message_deleted_logic(deleted_ts, channel):
@@ -3135,8 +2879,6 @@ def handle_message_deleted_logic(deleted_ts, channel):
             # Rimuovi dalla tabella duplicate_alerts
             cursor.execute("DELETE FROM duplicate_alerts WHERE parent_message_ts = ?", (deleted_ts,))
             conn.commit()
-
-        delete_xcancel_alert(deleted_ts, channel)
 
     except Exception as e:
         logger.error(f"Error handling message deletion for ts={deleted_ts}: {e}")

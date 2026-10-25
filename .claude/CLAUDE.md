@@ -8,7 +8,7 @@
 - **Message Archiving**: Captures all messages from public/private channels and DMs
 - **Historical Search**: Full-text search across the complete archive
 - **AI Features**: Thread analysis with GPT-4o, daily digests, podcast generation, semantic search
-- **Link Management**: Duplicate detection (45 days), tracking parameter removal, xcancel.com alternatives
+- **Link Management**: Duplicate detection (45 days), tracking parameter removal
 - **Privacy Controls**: User opt-out, AI opt-out, admin controls
 
 ---
@@ -184,7 +184,6 @@ WORKERS=4                                # Gunicorn workers
 |---------|---------|-------------|
 | Thread Analysis | `@archivebot` mention | GPT-4o analyzes thread context |
 | Duplicate Detection | Automatic | Alerts on duplicate links (45 days) |
-| xcancel Links | Automatic | Posts xcancel.com alternative for x.com |
 
 ### Rate Limits
 

@@ -177,7 +177,6 @@ def test_message_changed_reconciles_instagram_media_jobs(
     monkeypatch.setattr(bot, "reconcile_edited_message_links", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(bot, "_cleanup_stored_duplicate_alerts", lambda *_args: None)
     monkeypatch.setattr(bot, "check_and_store_links", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(bot, "sync_xcancel_alternatives_for_message", lambda *_args: None)
 
     bot.handle_message_changed(
         {
@@ -217,7 +216,6 @@ def test_message_changed_removing_all_instagram_links_cancels_pending_job(
     monkeypatch.setattr(bot, "reconcile_edited_message_links", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(bot, "_cleanup_stored_duplicate_alerts", lambda *_args: None)
     monkeypatch.setattr(bot, "check_and_store_links", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(bot, "sync_xcancel_alternatives_for_message", lambda *_args: None)
 
     bot.handle_message_changed(
         {
@@ -254,7 +252,6 @@ def test_message_deleted_cancels_instagram_media_jobs(
     assert bot.queue_instagram_media_from_message(message) == 1
     monkeypatch.setattr(bot, "collect_deleted_message_alerts", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(bot, "_cleanup_stored_duplicate_alerts", lambda *_args: None)
-    monkeypatch.setattr(bot, "delete_xcancel_alert", lambda *_args: None)
 
     bot.handle_message_deleted({"channel": "C1", "deleted_ts": "100.1"})
 
@@ -881,7 +878,6 @@ def test_archive_optout_redacts_storage_but_preserves_live_engage_trigger(
         "maybe_reply_to_engaged_thread",
         lambda message, say: routed.append(message.copy()),
     )
-    monkeypatch.setattr(bot, "post_xcancel_alternatives", lambda *_args, **_kwargs: None)
 
     bot.handle_message(
         {
