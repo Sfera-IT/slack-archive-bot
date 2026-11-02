@@ -96,9 +96,16 @@ If @ArchiveBot is the name you gave your bot user.
 
 ## Duplicate link and story detection
 
-Every external HTTP(S) link shared in a channel root or thread reply is checked
+Every external HTTP(S) link shared in a channel root or thread reply is archived
+and queued for enrichment. Automatic duplicate alerts compare standalone shares
 against the preceding 45 days. Slack links and messages without external links
 are ignored.
+
+To avoid interrupting conversations, automatic alerts are silent for thread
+replies, messages with user/group/broadcast mentions, and messages with question
+marks outside URLs. This applies to immediate and background alerts. Links remain
+searchable, and explicit bot mentions and engaged-thread AI replies keep their
+normal behavior without an extra duplicate warning.
 
 - The same normalized URL produces an immediate *same link* alert.
 - A different URL with the same extracted article text produces a *same content*

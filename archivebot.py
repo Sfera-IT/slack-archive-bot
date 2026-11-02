@@ -32,6 +32,7 @@ from instagram_media import (
     reconcile_instagram_media_jobs,
 )
 from link_duplicates import (
+    allows_automatic_duplicate_alert,
     collect_deleted_message_alerts,
     deliver_duplicate_alert,
     extract_external_links,
@@ -744,6 +745,7 @@ def check_and_store_links(message, permalink_dict, say, *, links=None):
             posted_at=float(message_ts),
             links=links,
             user_display_name=user_display_name,
+            allow_alert=allows_automatic_duplicate_alert(message),
         )
         if claim is None:
             return
