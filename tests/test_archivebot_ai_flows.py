@@ -69,6 +69,76 @@ def test_import_does_not_call_slack_api(archivebot_module):
     assert archivebot_module.app._bot_user_id
 
 
+@pytest.mark.parametrize(
+    "text,thread_ts,suppressed",
+    [
+        ("<@UOTHER> pareri su questa TV? https://example.com/story", None, True),
+        ("<@UOTHER|name> guarda https://example.com/story", None, True),
+        ("<@UBOT> riassumi https://example.com/story", None, True),
+        ("<!subteam^S123|team> https://example.com/story", None, True),
+        ("<!here> https://example.com/story", None, True),
+        ("Che ne pensate? <https://example.com/story|articolo>", None, True),
+        ("Interessante https://example.com/story", "1000.1", True),
+        ("https://example.com/story", None, False),
+        ("<https://example.com/story?source=chat|Titolo>", "1000.2", False),
+    ],
+)
+def test_conversational_links_are_archived_without_automatic_interruptions(
+    archivebot_module, text, thread_ts, suppressed
+):
+    from link_duplicates import prepare_enriched_duplicate_alerts
+    from link_enrichment import enqueue_link
+
+    bot = archivebot_module
+    conn, cursor = bot.db_connect(bot.database_path)
+    cursor.executemany(
+        "INSERT INTO channels(name, id, is_private) VALUES (?, ?, 0)",
+        [("source", "C0"), ("current", "C1")],
+    )
+    conn.commit()
+    # Match the current URL exactly, including its query string.
+    url = bot.extract_external_links(text, bot.normalize_url)[0].normalized_url
+    enqueue_link(
+        conn, channel="C0", message_timestamp="1000.0", thread_ts="1000.0",
+        normalized_url=url, original_url=url,
+        permalink="https://workspace.slack.com/archives/C0/p100000",
+        posted_at=1000.0, now=1000.0,
+    )
+    conn.close()
+    message = {
+        "user": "U1", "channel": "C1", "channel_type": "channel",
+        "ts": "1000.2", "text": text,
+    }
+    if thread_ts:
+        message["thread_ts"] = thread_ts
+    sent = []
+
+    def say(**kwargs):
+        sent.append(kwargs)
+        return {"ok": True, "ts": "1000.3"}
+
+    for _ in range(2):  # Slack event replay must remain silent/idempotent.
+        bot.check_and_store_links(message, {"permalink": "https://slack.com/current"}, say)
+
+    assert len(sent) == (0 if suppressed else 1)
+    conn, _ = bot.db_connect(bot.database_path)
+    row = conn.execute(
+        "SELECT deterministic_checked_at, duplicate_checked_at FROM message_links "
+        "WHERE channel = 'C1' AND message_timestamp = '1000.2'"
+    ).fetchone()
+    assert row is not None  # Archiving must not be skipped with the alert.
+    assert all(value is not None for value in row)
+    # A completed enrichment document must not produce a delayed interruption.
+    conn.execute(
+        "UPDATE link_documents SET fetch_status = 'complete', "
+        "content = ?, content_hash = 'same', embedding = ?, extraction_quality = 'full_text'",
+        ("An article with useful content. " * 30, b'\x00\x00\x80\x3f'),
+    )
+    conn.commit()
+    assert prepare_enriched_duplicate_alerts(conn, now=1001.0) == []
+    conn.close()
+
+
 def test_instagram_media_is_queued_before_mention_early_return(
     archivebot_module, monkeypatch
 ):

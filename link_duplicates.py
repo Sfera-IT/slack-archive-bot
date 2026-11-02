@@ -113,6 +113,22 @@ def route_link_message_event(
     return True
 
 
+def allows_automatic_duplicate_alert(message: dict) -> bool:
+    """Only interrupt standalone shares, not conversations or requests.
+
+    Mentions (including a mention of this bot) belong to the addressed reply
+    path. URL query strings must not be mistaken for questions.
+    """
+    if message.get("thread_ts") and message["thread_ts"] != message.get("ts"):
+        return False
+    text = message.get("text", "")
+    if re.search(r"<@[A-Z0-9]+(?:\|[^>]+)?>|<!(?:here|channel|everyone)(?:\|[^>]+)?>|<!subteam\^[^>]+>", text):
+        return False
+    prose = re.sub(r"<https?://[^>]+>", "", text, flags=re.IGNORECASE)
+    prose = URL_PATTERN.sub("", prose)
+    return "?" not in prose and "？" not in prose
+
+
 def find_exact_duplicate(
     conn: sqlite3.Connection,
     *,
@@ -485,6 +501,7 @@ def prepare_exact_duplicate_alert(
     posted_at: float,
     links: list[ExternalLink],
     user_display_name: str,
+    allow_alert: bool = True,
     now: float | None = None,
 ) -> AlertClaim | None:
     """Record all links, queue enrichment, and reserve at most one exact alert."""
@@ -500,6 +517,22 @@ def prepare_exact_duplicate_alert(
             posted_at=posted_at,
             now=now,
         )
+
+    if not allow_alert:
+        # Preserve searchable links and enrichment, but also suppress the
+        # asynchronous same-content/story path, including after event replay.
+        checked_at = now if now is not None else time.time()
+        conn.execute(
+            """
+            UPDATE message_links
+            SET deterministic_checked_at = COALESCE(deterministic_checked_at, ?),
+                duplicate_checked_at = COALESCE(duplicate_checked_at, ?)
+            WHERE channel = ? AND message_timestamp = ?
+            """,
+            (checked_at, checked_at, channel, message_timestamp),
+        )
+        conn.commit()
+        return None
 
     matches = [
         match
